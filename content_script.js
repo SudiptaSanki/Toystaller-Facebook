@@ -1,6 +1,6 @@
 // content_script.js
-// Specialized Instagram Media Extractor & Button Injector.
-// Supports: Profile Grid, Post/Reel Modals, Standalone Posts, Feed, Reels, Stories, DMs.
+// Specialized Facebook Media Extractor & Button Injector.
+// Supports: Watch, Reels, Stories, Theater Mode, News Feed Posts, Groups, Photo Albums, and Profile Timeline.
 
 let toystallerBooted = false;
 
@@ -8,9 +8,9 @@ function bootToystaller() {
     if (toystallerBooted) return;
     toystallerBooted = true;
 
-    // Inject platforms/instagram.js and page_interceptor.js into the MAIN world
+    // Inject platforms/facebook.js and page_interceptor.js into the MAIN world
     const scriptsToInject = [
-        'platforms/instagram.js',
+        'platforms/facebook.js',
         'page_interceptor.js'
     ];
 
@@ -40,7 +40,11 @@ function bootToystaller() {
 const pageInterceptedVideoUrls = new Set();
 window.addEventListener('message', (e) => {
     if (e.data && e.data.type === 'toystaller_video_urls' && Array.isArray(e.data.urls)) {
-        e.data.urls.forEach(url => pageInterceptedVideoUrls.add(url));
+        e.data.urls.forEach(url => {
+            if (isValidVideoUrl(url)) {
+                pageInterceptedVideoUrls.add(url);
+            }
+        });
     }
 });
 
@@ -69,21 +73,56 @@ function triggerDownload(url) {
     });
 }
 
+function cleanVideoUrl(url) {
+    if (!url || typeof url !== 'string') return null;
+    let clean = url;
+    clean = clean.replace(/\\\//g, '/');
+    clean = clean.replace(/&amp;/g, '&')
+                 .replace(/\\u0026/g, '&')
+                 .replace(/\u0026/g, '&')
+                 .replace(/\\u002526/g, '&');
+    clean = clean.replace(/([?&])bytestart=\d+&?/g, '$1')
+                 .replace(/([?&])byteend=\d+&?/g, '$1');
+    clean = clean.replace(/[?&]$/, '');
+    return clean.trim().replace(/^["']|["']$/g, '');
+}
+
+function isValidVideoUrl(url) {
+    if (!url || typeof url !== 'string') return false;
+    const lower = url.toLowerCase();
+    if (lower.startsWith('blob:') || lower.startsWith('data:')) return false;
+    if (lower.includes('facebook.com') || lower.includes('messenger.com') || lower.includes('instagram.com')) return false;
+    if (lower.includes('unified_cvc')) return false;
+    if (lower.includes('.m3u8') || lower.includes('.mpd') || lower.includes('stream_type=dash')) return false;
+    
+    // Reject image extensions & covers
+    if (lower.includes('.jpg') || lower.includes('.jpeg') || lower.includes('.png') || lower.includes('.webp') || lower.includes('videocover') || lower.includes('/t15.')) {
+        return false;
+    }
+
+    const isCdn = lower.includes('fbcdn.net') || lower.includes('fbsbx.com');
+    const isVideoExt = lower.includes('.mp4') || lower.includes('.m4v') || lower.includes('.webm');
+    const isVideoPath = lower.includes('/v/t42.') || lower.includes('/v/t64.') || lower.includes('/video/') || lower.includes('mime=video');
+
+    return isCdn && (isVideoExt || isVideoPath);
+}
+
 function scoreVideoUrl(url) {
     let score = 0;
     const lower = url.toLowerCase();
-    if (lower.includes('.mp4') || lower.includes('.m4v')) score += 10;
+    if (lower.includes('.mp4') || lower.includes('.m4v')) score += 15;
+    if (lower.includes('quality_hd') || lower.includes('_hd') || lower.includes('native_hd')) score += 30;
+    if (lower.includes('video.fbcdn.net')) score += 20;
     if (lower.includes('.m3u8') || lower.includes('.mpd') || lower.includes('/playlist/') || lower.includes('/manifest/') || lower.includes('stream_type=dash') || lower.includes('dash')) score -= 50;
-    if (lower.includes('bytestart') || lower.includes('byteend')) score -= 50;
     
     // Aggressive scoring for HD resolutions
-    if (lower.includes('1080')) score += 20;
-    else if (lower.includes('720')) score += 10;
+    if (lower.includes('1080')) score += 25;
+    else if (lower.includes('720')) score += 15;
     else if (lower.includes('480')) score += 5;
     else if (lower.includes('360')) score += 2;
     
-    // Heavily penalize image thumbnails to prevent them being picked as videos
-    if (lower.includes('videocover') || lower.includes('/image/') || lower.includes('.jpg') || lower.includes('.png') || lower.includes('.webp')) {
+    // Heavily penalize image thumbnails
+    if (lower.includes('videocover') || lower.includes('/image/') || lower.includes('.jpg') || lower.includes('.png') || lower.includes('.webp') || lower.includes('/t15.')) {
         score -= 500;
     }
 
@@ -93,20 +132,9 @@ function scoreVideoUrl(url) {
 
 function pickBestVideoUrl(urls) {
     if (!urls || urls.length === 0) return null;
-    let playable = urls.filter(u => {
-        const lower = u.toLowerCase();
-        if (lower.includes('bytestart') || lower.includes('byteend')) return false;
-        if (lower.includes('videocover') || lower.includes('/image/') || lower.includes('.jpg') || lower.includes('.png') || lower.includes('.webp')) return false;
-        if (lower.includes('.m3u8') || lower.includes('.mpd') || lower.includes('stream_type=dash')) return false;
-        return true;
-    });
-    if (playable.length === 0) {
-        playable = urls.filter(u => {
-            const lower = u.toLowerCase();
-            return !(lower.includes('videocover') || lower.includes('/image/') || lower.includes('.jpg') || lower.includes('.png') || lower.includes('.webp'));
-        });
-        if (playable.length === 0) return null;
-    }
+    const cleaned = urls.map(cleanVideoUrl).filter(Boolean);
+    let playable = cleaned.filter(u => isValidVideoUrl(u));
+    if (playable.length === 0) return null;
     const sorted = [...playable].sort((a, b) => scoreVideoUrl(b) - scoreVideoUrl(a));
     return sorted[0];
 }
@@ -139,13 +167,13 @@ const FALLBACK_PLATFORM = {
         return false;
     },
     getButtonScale() { return 1; },
-    filterBackgroundUrls(candidates) { return candidates; }
+    filterBackgroundUrls(candidates) { return candidates.filter(isValidVideoUrl); }
 };
 
 const PlatformManager = {
     getPlatform() {
         const platforms = window.ToystallerPlatforms;
-        if (platforms && platforms['instagram']) return platforms['instagram'];
+        if (platforms && platforms['facebook']) return platforms['facebook'];
         if (window.ToystallerActivePlatform) return window.ToystallerActivePlatform;
         return FALLBACK_PLATFORM;
     }
@@ -162,7 +190,7 @@ function injectDownloadButtons() {
         window.magicOverlayManager.updateAllPositions();
     }
 
-    const mediaElements = document.querySelectorAll('video, img');
+    const mediaElements = document.querySelectorAll('video, img, svg image, image');
 
     mediaElements.forEach(media => {
         if (platform.isThumbnail(media)) return;
@@ -205,6 +233,11 @@ function injectDownloadButtons() {
 
                 const getHighResImageUrl = () => {
                     let finalUrl = media.currentSrc || media.src;
+                    if (!finalUrl && (media.tagName.toLowerCase() === 'image' || media.tagName.toLowerCase() === 'svg')) {
+                        finalUrl = media.getAttribute('xlink:href') || 
+                                   media.getAttribute('href') || 
+                                   (media.href && media.href.baseVal ? media.href.baseVal : null);
+                    }
                     
                     if (media.srcset) {
                         const srcsetItems = media.srcset.split(',').map(s => s.trim().split(' '));
@@ -223,7 +256,7 @@ function injectDownloadButtons() {
                     if (finalUrl) {
                         const lower = finalUrl.toLowerCase();
                         if (lower.startsWith('blob:') || lower.startsWith('data:')) return null;
-                        if (lower.includes('//www.instagram.com') || lower.includes('//instagram.com')) return null;
+                        if (lower.includes('//www.facebook.com') || lower.includes('//facebook.com') || lower.includes('//web.facebook.com')) return null;
                     }
                     
                     return finalUrl;
@@ -232,13 +265,13 @@ function injectDownloadButtons() {
                 // Blue Button: Open Video/Image in new tab
                 const openBtn = document.createElement('button');
                 openBtn.className = 'magic-open-btn';
-                openBtn.title = isVideo ? 'Open video in new tab' : 'Open image in new tab';
+                openBtn.title = isVideo ? 'Open HD video in new tab' : 'Open photo in new tab';
                 openBtn.innerHTML = `<svg width="${iconSize}" height="${iconSize}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path><polyline points="15 3 21 3 21 9"></polyline><line x1="10" y1="14" x2="21" y2="3"></line></svg>`;
                 openBtn.style.cssText = makeBtnStyle('rgba(30,30,30,0.75)');
 
-                // For video elements, hide the blue button until we confirm a valid URL exists
+                // For video elements, pre-resolve in background
                 if (isVideo) {
-                    openBtn.style.display = 'none';
+                    openBtn.title = 'Open HD video in new tab';
                 }
 
                 openBtn.addEventListener('mouseenter', () => {
@@ -276,9 +309,20 @@ function injectDownloadButtons() {
                             safeSendMessage({ action: 'openInNewTab', url: getHighResImageUrl() });
                         }, 250);
                     } else {
-                        getMediaUrl((url) => {
-                            safeSendMessage({ action: 'openInNewTab', url: url });
-                        });
+                        const openVideo = (url) => {
+                            const clean = cleanVideoUrl(url);
+                            if (clean && isValidVideoUrl(clean)) {
+                                safeSendMessage({ action: 'openInNewTab', url: clean, isVideo: true });
+                            } else {
+                                alert('Could not find the HD video URL yet.\n\nTip: Make sure the video has started playing, then click the button again.');
+                            }
+                        };
+
+                        if (openBtn.__resolvedVideoUrl && isValidVideoUrl(openBtn.__resolvedVideoUrl)) {
+                            openVideo(openBtn.__resolvedVideoUrl);
+                        } else {
+                            getMediaUrl(openVideo);
+                        }
                     }
                 });
                 buttons.push(openBtn);
@@ -358,8 +402,9 @@ function injectDownloadButtons() {
             const preResolveVideoUrl = (openBtn) => {
                 if (!isVideo) return;
                 getMediaUrl((url) => {
-                    if (url) {
-                        openBtn.__resolvedVideoUrl = url;
+                    const clean = cleanVideoUrl(url);
+                    if (clean && isValidVideoUrl(clean)) {
+                        openBtn.__resolvedVideoUrl = clean;
                         openBtn.style.display = 'flex';
                     }
                 }, true);
@@ -373,8 +418,9 @@ function injectDownloadButtons() {
                         if (resolved) return;
                         resolved = true;
                         window.removeEventListener('message', handler);
-                        if (e.data.url) {
-                            callback(e.data.url);
+                        const clean = cleanVideoUrl(e.data.url);
+                        if (clean && isValidVideoUrl(clean)) {
+                            callback(clean);
                         } else {
                             getMediaUrlFallback(callback, silent);
                         }
@@ -387,7 +433,7 @@ function injectDownloadButtons() {
                         resolved = true;
                         window.removeEventListener('message', handler);
                         getMediaUrlFallback(callback, silent);
-                    }, 350);
+                    }, 400);
                     return;
                 }
 
@@ -395,94 +441,66 @@ function injectDownloadButtons() {
             };
 
             const getMediaUrlFallback = (callback, silent = false) => {
-                const currentSrc = media.currentSrc || media.src || '';
-                const isBlobSource = currentSrc.startsWith('blob:') || currentSrc.startsWith('data:');
-
-                if (isVideo && isBlobSource && pageInterceptedVideoUrls.size > 0) {
+                // 1. Check in-memory intercepted video URLs from fetch/XHR
+                if (isVideo && pageInterceptedVideoUrls.size > 0) {
                     const platform = PlatformManager.getPlatform();
-                    const platformVideos = platform.filterBackgroundUrls ? platform.filterBackgroundUrls(Array.from(pageInterceptedVideoUrls), true) : Array.from(pageInterceptedVideoUrls);
+                    const cleaned = Array.from(pageInterceptedVideoUrls).map(cleanVideoUrl).filter(Boolean);
+                    const candidates = cleaned.filter(isValidVideoUrl);
+                    const filtered = platform.filterBackgroundUrls ? platform.filterBackgroundUrls(candidates, true) : candidates;
 
-                    if (platformVideos.length > 0) {
-                        const best = pickBestVideoUrl(platformVideos);
-                        if (best) {
+                    if (filtered.length > 0) {
+                        const best = pickBestVideoUrl(filtered);
+                        if (best && isValidVideoUrl(best)) {
                             callback(best);
                             return;
                         }
                     }
                 }
 
-                const getFilename = (urlStr) => {
-                    try {
-                        const parts = new URL(urlStr).pathname.split('/');
-                        const name = parts.pop();
-                        return (name && name.length > 5) ? name : null;
-                    } catch (e) { return null; }
-                };
-
-                const currentFilename = getFilename(currentSrc);
-
-                if (isVideo && pageInterceptedVideoUrls.size > 0 && currentFilename) {
-                    const matches = Array.from(pageInterceptedVideoUrls).filter(u => {
-                        const interceptedName = getFilename(u);
-                        return interceptedName && interceptedName === currentFilename && !u.includes('bytestart');
-                    });
-
-                    if (matches.length > 0) {
-                        const best = pickBestVideoUrl(matches);
-                        if (best) {
-                            callback(best);
-                            return;
-                        }
-                    }
-                }
-
-                const isInternalPage = (urlStr) => {
-                    const lower = (urlStr || '').toLowerCase();
-                    return lower.includes('//www.instagram.com') ||
-                           lower.includes('//instagram.com');
-                };
-
-                if (isVideo && media.currentSrc &&
-                    !media.currentSrc.startsWith('blob:') &&
-                    !media.currentSrc.startsWith('data:') &&
-                    !isInternalPage(media.currentSrc)) {
-                    callback(media.currentSrc);
-                    return;
-                }
-
-                if (media.src && !media.src.startsWith('blob:') && !media.src.startsWith('data:') && !isInternalPage(media.src)) {
-                    callback(media.src);
-                    return;
-                }
-
+                // 2. Direct scan of document <script> tags from content script context
                 if (isVideo) {
-                    const sourceTag = media.querySelector('source');
-                    if (sourceTag && sourceTag.src &&
-                        !sourceTag.src.startsWith('blob:') &&
-                        !sourceTag.src.startsWith('data:') &&
-                        !isInternalPage(sourceTag.src)) {
-                        callback(sourceTag.src);
-                        return;
+                    const scripts = document.querySelectorAll('script[type="application/json"], script:not([src])');
+                    const scriptCandidates = [];
+                    const cdnRegex = /"(https:(?:\\\/\\\/|\/\/)[^"]+?(?:fbcdn\.net|fbsbx\.com)[^"]+?\.(?:mp4|m4v)[^"]*)"/g;
+                    for (const s of scripts) {
+                        const text = s.textContent;
+                        if (!text || (!text.includes('fbcdn.net') && !text.includes('fbsbx.com') && !text.includes('playable_url'))) continue;
+                        let m;
+                        while ((m = cdnRegex.exec(text)) !== null) {
+                            try {
+                                const u = cleanVideoUrl(JSON.parse('"' + m[1] + '"'));
+                                if (u && isValidVideoUrl(u)) scriptCandidates.push(u);
+                            } catch(e) {
+                                const unescaped = cleanVideoUrl(m[1]);
+                                if (unescaped && isValidVideoUrl(unescaped)) scriptCandidates.push(unescaped);
+                            }
+                        }
+                    }
+                    if (scriptCandidates.length > 0) {
+                        const best = pickBestVideoUrl(scriptCandidates);
+                        if (best && isValidVideoUrl(best)) {
+                            callback(best);
+                            return;
+                        }
                     }
                 }
 
-                // Last resort: ask background script for network-intercepted URLs
+                // 3. Fallback to background script webRequest
                 const mediaType = isVideo ? 'video' : 'img';
                 safeSendMessage({ action: 'getMediaUrls', mediaType: mediaType }, (response) => {
                     if (response && response.urls && response.urls.length > 0) {
-                        const platform = PlatformManager.getPlatform();
-                        let candidates = response.urls;
-                        const filtered = platform.filterBackgroundUrls(candidates, isVideo);
-                        if (filtered && filtered.length > 0) candidates = filtered;
-                        
-                        const best = pickBestVideoUrl(candidates);
-                        if (best) {
-                            callback(best);
-                            return;
+                        const cleaned = response.urls.map(cleanVideoUrl).filter(Boolean);
+                        const candidates = cleaned.filter(isValidVideoUrl);
+                        if (candidates.length > 0) {
+                            const best = pickBestVideoUrl(candidates);
+                            if (best && isValidVideoUrl(best)) {
+                                callback(best);
+                                return;
+                            }
                         }
                     }
                     if (!silent) {
-                        alert('Could not find the video URL yet.\n\nTip: Make sure the video has started playing, then click the button again.');
+                        alert('Could not find the HD video URL yet.\n\nTip: Make sure the video has started playing, then click the button again.');
                     }
                 });
             };
@@ -490,7 +508,7 @@ function injectDownloadButtons() {
             if (window.magicOverlayManager) {
                 window.magicOverlayManager.addOverlay(media, createButtonsFn);
                 if (isVideo) {
-                    setTimeout(() => {
+                    const doPreResolve = () => {
                         const overlay = window.magicOverlayManager.overlays.get(media);
                         if (overlay && overlay.container) {
                             const openBtn = overlay.container.querySelector('.magic-open-btn');
@@ -498,7 +516,10 @@ function injectDownloadButtons() {
                                 preResolveVideoUrl(openBtn);
                             }
                         }
-                    }, 100);
+                    };
+                    setTimeout(doPreResolve, 200);
+                    media.addEventListener('play', doPreResolve, { passive: true });
+                    media.addEventListener('playing', doPreResolve, { passive: true });
                 }
             }
         }
@@ -514,7 +535,7 @@ function scheduleInject() {
     }, 150);
 }
 
-// Automatically boot for Instagram
+// Automatically boot for Facebook
 bootToystaller();
 
 // --- Dashboard UI Injection ---
@@ -572,7 +593,7 @@ function toggleDashboardOverlay() {
                 margin: 0;
                 font-size: 18px;
                 font-weight: 600;
-                background: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%);
+                background: linear-gradient(135deg, #1877f2 0%, #00f2fe 100%);
                 -webkit-background-clip: text;
                 -webkit-text-fill-color: transparent;
             }
@@ -606,23 +627,23 @@ function toggleDashboardOverlay() {
                 font-size: 12px;
                 line-height: 1.5;
                 color: #ddd;
-                border-left: 3px solid #4facfe;
+                border-left: 3px solid #1877f2;
             }
         </style>
         
         <div class="dashboard">
             <div class="header">
-                <h2>Toystaller v6 — Instagram</h2>
+                <h2>Toystaller v6 — Facebook</h2>
                 <button class="close-btn" id="closeBtn" title="Close">&times;</button>
             </div>
             <div class="info-row">
-                Active on Instagram
+                Active on Facebook
             </div>
             <div class="specialization">
                 <strong>Features:</strong><br/>
-                • Profile Grid & High-Res Avatar Downloads<br/>
-                • Modal Post & Reel Video HD Extraction<br/>
-                • Dedicated Reels & Stories Support<br/>
+                • Watch & Reels HD Video Extraction<br/>
+                • Theater Mode Full-Resolution Photo Downloads<br/>
+                • News Feed & Group Media Downloads<br/>
                 • Zero Overlay Bleed & Instant Dialog Isolation
             </div>
         </div>

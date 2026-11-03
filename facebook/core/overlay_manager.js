@@ -11,10 +11,11 @@ class OverlayManager {
 
         // Per-section toggle settings (loaded from chrome.storage)
         this._sectionToggles = {
-            toystaller_show_grid:    true,
-            toystaller_show_feed:    true,
-            toystaller_show_stories: true,
-            toystaller_show_dm:      true
+            toystaller_fb_show_feed:    true,
+            toystaller_fb_show_watch:   true,
+            toystaller_fb_show_reels:   true,
+            toystaller_fb_show_stories: true,
+            toystaller_fb_show_photos:  true
         };
         this._loadToggles();
 
@@ -32,7 +33,13 @@ class OverlayManager {
         document.addEventListener('mousemove', this._onMouseMove, true);
         document.addEventListener('pointermove', this._onMouseMove, true);
 
-        window.addEventListener('scroll', () => this.updateAllPositions(), true);
+        window.addEventListener('scroll', () => {
+            if (this.activeEntry) {
+                this._hide(this.activeEntry);
+                this.activeEntry = null;
+            }
+            this.updateAllPositions();
+        }, { passive: true, capture: true });
         window.addEventListener('resize', () => this.updateAllPositions());
 
         // Instant modal listener — when a dialog/modal opens or closes, immediately sync overlay visibility
@@ -73,20 +80,28 @@ class OverlayManager {
         if (!platform || !platform.getSection) return false;
         const section = platform.getSection();
 
-        // Reels, modals, and standalone posts are ALWAYS enabled (never toggled off)
-        if (section === 'reels' || section === 'modal' || section === 'post_standalone') return false;
+        // Modals (Theater mode) are ALWAYS enabled (never toggled off)
+        if (section === 'modal') return false;
 
         // Map sections to toggle keys
-        if (section === 'feed')    return !this._sectionToggles.toystaller_show_feed;
-        if (section === 'stories') return !this._sectionToggles.toystaller_show_stories;
-        if (section === 'direct')  return !this._sectionToggles.toystaller_show_dm;
-
-        // All profile grid sections and explore → grid toggle
-        if (section.startsWith('profile_') || section === 'explore') {
-            return !this._sectionToggles.toystaller_show_grid;
-        }
+        if (section === 'feed' || section === 'groups') return !this._sectionToggles.toystaller_fb_show_feed;
+        if (section === 'watch') return !this._sectionToggles.toystaller_fb_show_watch;
+        if (section === 'reels') return !this._sectionToggles.toystaller_fb_show_reels;
+        if (section === 'stories') return !this._sectionToggles.toystaller_fb_show_stories;
+        if (section === 'photos' || section.startsWith('profile_') || section === 'friends') return !this._sectionToggles.toystaller_fb_show_photos;
 
         return false;
+    }
+
+    _getTopNavHeight() {
+        const banner = document.querySelector('header[role="banner"], div[role="banner"], [role="banner"], #header');
+        if (banner) {
+            const bRect = banner.getBoundingClientRect();
+            if (bRect.top <= 10 && bRect.bottom >= 40 && bRect.bottom <= 120) {
+                return bRect.bottom;
+            }
+        }
+        return 56;
     }
 
     _getPlatform() {
@@ -96,8 +111,8 @@ class OverlayManager {
         if (window.ToystallerActivePlatform) {
             return window.ToystallerActivePlatform;
         }
-        if (window.ToystallerPlatforms && window.ToystallerPlatforms['instagram']) {
-            return window.ToystallerPlatforms['instagram'];
+        if (window.ToystallerPlatforms && window.ToystallerPlatforms['facebook']) {
+            return window.ToystallerPlatforms['facebook'];
         }
         return null;
     }
@@ -124,7 +139,19 @@ class OverlayManager {
         const platform = this._getPlatform();
         if (platform && platform.getHoverHost) {
             const host = platform.getHoverHost(media);
-            if (host) return host;
+            if (host && host.isConnected) {
+                const hostRect = host.getBoundingClientRect();
+                const mediaRect = media.getBoundingClientRect();
+                const section = platform.getSection ? platform.getSection() : '';
+                // In friends list or card grids, the host card is naturally wider than the avatar
+                if (section === 'friends' && hostRect.width > 0 && hostRect.height > 0) {
+                    return host;
+                }
+                if (mediaRect.width > 0 && hostRect.width <= Math.max(mediaRect.width * 2.6, mediaRect.width + 80)) {
+                    return host;
+                }
+                if (mediaRect.width === 0) return host;
+            }
         }
 
         const mediaRect = media.getBoundingClientRect();
@@ -198,9 +225,22 @@ class OverlayManager {
 
     _getHoverRect(media, entry) {
         const mediaRect = media.getBoundingClientRect();
+        if (!entry.hoverHost || entry.hoverHost === media) return mediaRect;
         const hostRect = entry.hoverHost.getBoundingClientRect();
 
-        if (hostRect.width >= mediaRect.width * 0.8 && hostRect.height >= mediaRect.height * 0.8) {
+        const platform = this._getPlatform();
+        const inModal = platform && platform.isInsideModal ? platform.isInsideModal(media) : false;
+
+        if (inModal) {
+            if (hostRect.width >= mediaRect.width * 0.8 && hostRect.height >= mediaRect.height * 0.8) {
+                return hostRect;
+            }
+            return mediaRect;
+        }
+
+        // Outside modal: limit host bounds to prevent swallowing sibling cards
+        if (hostRect.width >= mediaRect.width * 0.8 && hostRect.width <= Math.max(mediaRect.width * 1.5, mediaRect.width + 40) &&
+            hostRect.height >= mediaRect.height * 0.8 && hostRect.height <= Math.max(mediaRect.height * 1.5, mediaRect.height + 40)) {
             return hostRect;
         }
         return mediaRect;
@@ -212,6 +252,13 @@ class OverlayManager {
 
         const platform = this._getPlatform();
         const hasModal = platform && platform.hasActiveModal ? platform.hasActiveModal() : false;
+        const topNavHeight = hasModal ? 0 : this._getTopNavHeight();
+
+        // Top navigation bar guard: cursor is in the header, hide overlays
+        if (y <= topNavHeight) {
+            this._scheduleHide();
+            return;
+        }
 
         let hoverCandidates = [];
 
@@ -257,26 +304,44 @@ class OverlayManager {
 
         let matchedCandidates = [];
 
-        for (const el of hits) {
-            for (const candidate of hoverCandidates) {
-                const entry = candidate.entry;
-                const media = candidate.media;
-                if (el === entry.hoverHost || entry.hoverHost.contains(el) || el === media || media.contains(el)) {
-                    if (!matchedCandidates.includes(candidate)) {
-                        matchedCandidates.push(candidate);
-                    }
+        for (const candidate of hoverCandidates) {
+            const entry = candidate.entry;
+            const media = candidate.media;
+            const mRect = media.getBoundingClientRect();
+            const hRect = entry.hoverHost ? entry.hoverHost.getBoundingClientRect() : mRect;
+
+            const inMedia = this._pointInRect(x, y, mRect);
+            const inHost = this._pointInRect(x, y, hRect);
+
+            if (inMedia || inHost) {
+                const belongs = hits.some(el => {
+                    if (el === media || media.contains(el)) return true;
+                    if (entry.hoverHost && (el === entry.hoverHost || entry.hoverHost.contains(el))) return true;
+                    const card = media.closest('a[href*="/reel"], a[href*="/reels"], div[data-pagelet*="Reel"], div[role="article"], div[role="listitem"]');
+                    if (card && (el === card || card.contains(el))) return true;
+                    return false;
+                });
+                if (belongs && !matchedCandidates.includes(candidate)) {
+                    matchedCandidates.push(candidate);
                 }
             }
         }
 
         if (matchedCandidates.length > 0) {
-            // Prioritize <video> tags over <img> tags (e.g. poster images covering the video)
-            const videoCandidate = matchedCandidates.find(c => c.media.tagName.toLowerCase() === 'video');
-            if (videoCandidate) {
-                this._show(videoCandidate.entry);
-            } else {
-                this._show(matchedCandidates[0].entry);
+            // Find candidate that directly contains the cursor (so sibling cards in carousels never steal hover)
+            let best = null;
+            for (const c of matchedCandidates) {
+                const mr = c.media.getBoundingClientRect();
+                if (this._pointInRect(x, y, mr)) {
+                    if (!best || (c.media.tagName.toLowerCase() === 'video' && best.media.tagName.toLowerCase() !== 'video')) {
+                        best = c;
+                    }
+                }
             }
+            if (!best) {
+                best = matchedCandidates[0];
+            }
+            this._show(best.entry);
             return;
         }
 
@@ -450,6 +515,14 @@ class OverlayManager {
                 x = rect.right - pad - width / 2;
                 y = rect.top + pad + topOffset + height / 2;
                 break;
+            case 'top-center':
+                x = rect.left + rect.width / 2;
+                y = rect.top + pad + topOffset + height / 2;
+                break;
+            case 'bottom-center':
+                x = rect.left + rect.width / 2;
+                y = rect.bottom - pad - height / 2;
+                break;
             default:
                 return true;
         }
@@ -508,8 +581,12 @@ class OverlayManager {
             depth++;
         }
 
-        // Also clamp to viewport
-        visTop = Math.max(visTop, 0);
+        const platform = this._getPlatform();
+        const inModal = platform && platform.isInsideModal ? platform.isInsideModal(media) : false;
+        const topLimit = inModal ? 0 : this._getTopNavHeight();
+
+        // Also clamp to viewport & sticky top nav
+        visTop = Math.max(visTop, topLimit);
         visLeft = Math.max(visLeft, 0);
         visBottom = Math.min(visBottom, window.innerHeight);
         visRight = Math.min(visRight, window.innerWidth);
@@ -550,23 +627,67 @@ class OverlayManager {
                 top = rect.top + pad + topOffset;
                 left = rect.right - width - pad;
                 break;
+            case 'top-center':
+                top = rect.top + pad + topOffset;
+                left = rect.left + (rect.width - width) / 2;
+                break;
+            case 'bottom-center':
+                top = rect.bottom - height - pad;
+                left = rect.left + (rect.width - width) / 2;
+                break;
             default:
                 top = rect.top + pad + topOffset;
                 left = rect.left + pad;
+        }
+
+        const platform = this._getPlatform();
+        const section = platform && platform.getSection ? platform.getSection() : 'feed';
+        const inModal = platform && platform.isInsideModal ? platform.isInsideModal(media) : false;
+        const isImmersive = inModal || section === 'reels' || section === 'stories';
+        const topNavHeight = isImmersive ? 0 : this._getTopNavHeight();
+
+        // Strict Top Nav Collision Prevention on standard pages:
+        if (!isImmersive) {
+            // If top of media has scrolled under the navbar, don't pin top buttons to navbar!
+            if (corner.startsWith('top') && (rect.top + pad < topNavHeight + 10)) {
+                // If bottom half is still comfortably visible, switch to bottom-right
+                if (rect.bottom > topNavHeight + height + pad + 24) {
+                    top = rect.bottom - height - pad;
+                    left = rect.right - width - pad;
+                } else {
+                    // Media is scrolled out behind navbar, hide
+                    container.style.display = 'none';
+                    container.style.visibility = 'hidden';
+                    return;
+                }
+            }
         }
 
         // Compute the VISIBLE portion of the media (accounts for sticky headers,
         // overflow-hidden ancestors, and viewport edges)
         const vis = media ? this._getVisibleRect(media) : rect;
 
-        // CLAMP: Ensure buttons stay INSIDE the VISIBLE media frame
-        const minTop = vis.top + 2;
+        // CLAMP: Ensure buttons stay INSIDE the VISIBLE media frame and below top nav
+        const minTop = Math.max(vis.top + 2, topNavHeight + 4);
         const maxTop = vis.bottom - height - 2;
         const minLeft = vis.left + 2;
         const maxLeft = vis.right - width - 2;
 
+        if (maxTop < minTop) {
+            container.style.display = 'none';
+            container.style.visibility = 'hidden';
+            return;
+        }
+
         top = Math.max(minTop, Math.min(top, maxTop));
         left = Math.max(minLeft, Math.min(left, maxLeft));
+
+        // Absolute hard barrier: buttons must NEVER be placed inside or above navbar on feed/groups/profile
+        if (!isImmersive && top < topNavHeight + 4) {
+            container.style.display = 'none';
+            container.style.visibility = 'hidden';
+            return;
+        }
 
         container.style.top = `${top}px`;
         container.style.left = `${left}px`;
@@ -618,6 +739,27 @@ class OverlayManager {
         const rect = media.getBoundingClientRect();
         const style = window.getComputedStyle(media);
         const isStyleHidden = style.opacity === '0' || style.visibility === 'hidden' || style.display === 'none';
+
+        const inModal = platform && platform.isInsideModal ? platform.isInsideModal(media) : false;
+        const topNavHeight = inModal ? 0 : this._getTopNavHeight();
+
+        // If media has scrolled behind top navbar or off screen
+        if (rect.bottom <= topNavHeight + 8) {
+            container.style.display = 'none';
+            container.style.visibility = 'hidden';
+            container.style.pointerEvents = 'none';
+            if (this.activeEntry === entry) this.activeEntry = null;
+            return;
+        }
+
+        const vis = this._getVisibleRect(media);
+        if (vis.height < 45 || vis.width < 50) {
+            container.style.display = 'none';
+            container.style.visibility = 'hidden';
+            container.style.pointerEvents = 'none';
+            if (this.activeEntry === entry) this.activeEntry = null;
+            return;
+        }
 
         if (rect.width === 0 || rect.height === 0 || !entry.isVisible || isStyleHidden || this._isClippedByAncestor(media)) {
             container.style.display = 'none';

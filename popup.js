@@ -1,17 +1,19 @@
-// popup.js — Manages toggle settings for Toystaller overlay visibility per section
+// popup.js — Manages toggle settings for Toystaller overlay visibility per section on Facebook
 
 const TOGGLE_KEYS = {
-    toggleGrid:    'toystaller_show_grid',
-    toggleFeed:    'toystaller_show_feed',
-    toggleStories: 'toystaller_show_stories',
-    toggleDM:      'toystaller_show_dm'
+    toggleFeed:    'toystaller_fb_show_feed',
+    toggleWatch:   'toystaller_fb_show_watch',
+    toggleReels:   'toystaller_fb_show_reels',
+    toggleStories: 'toystaller_fb_show_stories',
+    togglePhotos:  'toystaller_fb_show_photos'
 };
 
 const DEFAULTS = {
-    toystaller_show_grid:    true,
-    toystaller_show_feed:    true,
-    toystaller_show_stories: true,
-    toystaller_show_dm:      true
+    toystaller_fb_show_feed:    true,
+    toystaller_fb_show_watch:   true,
+    toystaller_fb_show_reels:   true,
+    toystaller_fb_show_stories: true,
+    toystaller_fb_show_photos:  true
 };
 
 // Load saved settings into checkboxes
@@ -24,7 +26,7 @@ chrome.storage.local.get(Object.values(TOGGLE_KEYS), (result) => {
     }
 });
 
-// Save on change and notify active Instagram tabs
+// Save on change and notify active Facebook tabs
 for (const [elemId, storageKey] of Object.entries(TOGGLE_KEYS)) {
     const el = document.getElementById(elemId);
     if (!el) continue;
@@ -33,8 +35,8 @@ for (const [elemId, storageKey] of Object.entries(TOGGLE_KEYS)) {
         const obj = {};
         obj[storageKey] = el.checked;
         chrome.storage.local.set(obj, () => {
-            // Notify all Instagram tabs to refresh overlay visibility
-            chrome.tabs.query({ url: '*://*.instagram.com/*' }, (tabs) => {
+            // Notify all Facebook tabs to refresh overlay visibility
+            chrome.tabs.query({ url: '*://*.facebook.com/*' }, (tabs) => {
                 for (const tab of tabs) {
                     chrome.tabs.sendMessage(tab.id, {
                         action: 'toystaller_settings_changed',
