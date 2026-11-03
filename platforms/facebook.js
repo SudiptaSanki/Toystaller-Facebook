@@ -66,35 +66,44 @@ window.ToystallerPlatforms = window.ToystallerPlatforms || {};
 
         // --- Route & Section Detection ---
         getSection() {
-            // 1. Theater / MediaViewer modal always takes priority
-            if (this.hasActiveModal()) return 'modal';
-
             const path = window.location.pathname.toLowerCase().replace(/\/+$/, '') || '/';
             const search = window.location.search.toLowerCase();
             const host = window.location.hostname.toLowerCase();
 
-            // 2. Settings / static pages — skip
+            // 1. Settings / static pages — skip
             if (path.startsWith('/settings') || path.startsWith('/privacy') ||
                 path.startsWith('/help') || path.startsWith('/policies') ||
                 path.startsWith('/checkpoint') || path.startsWith('/login')) {
                 return 'settings';
             }
 
-            // 3. Friends section
+            // 2. Dedicated video & media player routes MUST precede generic modal detection:
+            // (On Facebook, Reels are wrapped in a dialog/modal container, so checking modal first misclassifies Reels)
+            if (path.startsWith('/reel/') || path.startsWith('/reels') || search.includes('reel_id=')) return 'reels';
+            if (path.startsWith('/watch') || path.startsWith('/videos/')) return 'watch';
+            if (path.startsWith('/stories')) return 'stories';
+
+            // 3. Friends section (including profile visits from friend suggestions: /friends/suggestions/?profile_id=...)
             if (path === '/friends' || path.startsWith('/friends') || search.includes('sk=friends')) {
                 return 'friends';
             }
 
-            // 4. Top-level routes
+            // 4. Check if active modal is specifically a Reel player dialog
+            const activeModal = this.getActiveModal();
+            if (activeModal && activeModal.querySelector('a[href*="/reel"], a[href*="/reels"], div[data-pagelet*="Reel"], [aria-label*="Reel" i]')) {
+                return 'reels';
+            }
+
+            // 5. Theater / MediaViewer modal (for photo lightbox or post dialogs)
+            if (this.hasActiveModal()) return 'modal';
+
+            // 6. Top-level routes
             if (host.includes('messenger.com') || path.startsWith('/messages')) return 'messages';
-            if (path.startsWith('/watch') || path.startsWith('/videos/')) return 'watch';
-            if (path.startsWith('/reel/') || path.startsWith('/reels')) return 'reels';
-            if (path.startsWith('/stories')) return 'stories';
             if (path.startsWith('/groups')) return 'groups';
             if (path.startsWith('/marketplace')) return 'marketplace';
             if (path.startsWith('/photo') || path.startsWith('/photos') || path.startsWith('/media/set')) return 'photos';
 
-            // 5. Profile sub-tabs: /<username>/<tab>/ or ?sk=<tab>
+            // 7. Profile sub-tabs: /<username>/<tab>/ or ?sk=<tab>
             if (search.includes('sk=photos') || search.includes('tab=photos') || path.endsWith('/photos')) {
                 return 'profile_photos';
             }
@@ -105,7 +114,7 @@ window.ToystallerPlatforms = window.ToystallerPlatforms || {};
                 return 'profile_reels';
             }
 
-            // 6. Main Feed vs Profile Timeline
+            // 8. Main Feed vs Profile Timeline
             if (path === '/' || path === '') return 'feed';
 
             // Profile page check: /profile.php or single segment /<username>
@@ -123,25 +132,35 @@ window.ToystallerPlatforms = window.ToystallerPlatforms || {};
         },
 
         // --- Corner Placement Config Per Section ---
-        getPlatformConfig(path) {
+        getPlatformConfig(path, media) {
             const section = this.getSection();
+
+            // Determine if media is a Reel / vertical video (even inside modal or feed)
+            const isReelMedia = section === 'reels' || (media && (
+                (media.tagName && media.tagName.toLowerCase() === 'video' && (
+                    (media.videoHeight && media.videoWidth && media.videoHeight > media.videoWidth * 1.05) ||
+                    (media.offsetHeight && media.offsetWidth && media.offsetHeight > media.offsetWidth * 1.05) ||
+                    media.closest('a[href*="/reel"], a[href*="/reels"], div[data-pagelet*="Reel"], [aria-label*="Reel" i]')
+                ))
+            ));
+
+            if (isReelMedia) {
+                // Top-right corner placed safely below Facebook's native circular search button.
+                // Search button is at top: 12-52px, right: 16-20px.
+                // Setting topOffset: 68 places buttons at y = 16 + 68 = 84px, directly below the search button.
+                // This completely clears the horizontal sound/volume button on the left and search button on the right.
+                return { 
+                    preferredCorners: ['top-right', 'bottom-right'], 
+                    padding: 16, 
+                    topOffset: 68 
+                };
+            }
 
             if (section === 'modal') {
                 return { preferredCorners: ['top-left', 'bottom-left'], padding: 14 };
             }
             if (section === 'watch') {
                 return { preferredCorners: ['top-left', 'bottom-left'], padding: 16 };
-            }
-            if (section === 'reels') {
-                // Top-right corner placed below Facebook's native circular search button.
-                // Search button is at top: 12-52px, right: 16-20px.
-                // Setting topOffset: 68 places buttons at y = 16 + 68 = 84px, safely below the search button.
-                // This completely clears the horizontal sound/volume bar on the left and search button on the right.
-                return { 
-                    preferredCorners: ['top-right', 'bottom-right'], 
-                    padding: 16, 
-                    topOffset: 68 
-                };
             }
             if (section === 'stories') {
                 return { preferredCorners: ['top-left', 'bottom-left'], padding: 16, topOffset: 48 };

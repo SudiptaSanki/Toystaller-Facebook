@@ -484,16 +484,16 @@ class OverlayManager {
         return false;
     }
 
-    getPlatformConfig() {
+    getPlatformConfig(media) {
         const platform = this._getPlatform();
         if (platform && platform.getPlatformConfig) {
-            return platform.getPlatformConfig(window.location.pathname.toLowerCase());
+            return platform.getPlatformConfig(window.location.pathname.toLowerCase(), media);
         }
         return { preferredCorners: ['top-left', 'bottom-left', 'top-right'], padding: 12 };
     }
 
     cornerHasConflict(media, rect, corner, width, height, pad = 12) {
-        const config = this.getPlatformConfig();
+        const config = this.getPlatformConfig(media);
         const topOffset = config.topOffset || 0;
         let x;
         let y;
@@ -541,7 +541,7 @@ class OverlayManager {
     pickBestCorner(media, rect, container) {
         const width = container.offsetWidth || 80;
         const height = container.offsetHeight || 36;
-        const config = this.getPlatformConfig();
+        const config = this.getPlatformConfig(media);
 
         const corners = [...config.preferredCorners];
 
@@ -602,7 +602,7 @@ class OverlayManager {
     }
 
     applyCornerPosition(rect, container, corner, media) {
-        const config = this.getPlatformConfig();
+        const config = this.getPlatformConfig(media);
         const pad = config.padding;
         const topOffset = config.topOffset || 0;
         const width = container.offsetWidth || 80;
@@ -643,47 +643,37 @@ class OverlayManager {
         const platform = this._getPlatform();
         const section = platform && platform.getSection ? platform.getSection() : 'feed';
         const inModal = platform && platform.isInsideModal ? platform.isInsideModal(media) : false;
-        const isImmersive = inModal || section === 'reels' || section === 'stories';
+        const isReel = section === 'reels' || (config.preferredCorners && config.preferredCorners[0] === 'top-right' && config.topOffset);
+        const isImmersive = inModal || isReel || section === 'stories';
         const topNavHeight = isImmersive ? 0 : this._getTopNavHeight();
 
-        // Strict Top Nav Collision Prevention on standard pages:
+        // 1. Strict Top Boundary:
+        // As media scrolls, keep button locked in place! When its corner reaches the top navbar,
+        // HIDE it gracefully — NEVER dynamically jump down to bottom-right!
         if (!isImmersive) {
-            // If top of media has scrolled under the navbar, don't pin top buttons to navbar!
-            if (corner.startsWith('top') && (rect.top + pad < topNavHeight + 10)) {
-                // If bottom half is still comfortably visible, switch to bottom-right
-                if (rect.bottom > topNavHeight + height + pad + 24) {
-                    top = rect.bottom - height - pad;
-                    left = rect.right - width - pad;
-                } else {
-                    // Media is scrolled out behind navbar, hide
-                    container.style.display = 'none';
-                    container.style.visibility = 'hidden';
-                    return;
-                }
+            if (top < topNavHeight + 4) {
+                container.style.display = 'none';
+                container.style.visibility = 'hidden';
+                return;
+            }
+        } else {
+            if (top < 4) {
+                container.style.display = 'none';
+                container.style.visibility = 'hidden';
+                return;
             }
         }
 
-        // Compute the VISIBLE portion of the media (accounts for sticky headers,
-        // overflow-hidden ancestors, and viewport edges)
-        const vis = media ? this._getVisibleRect(media) : rect;
-
-        // CLAMP: Ensure buttons stay INSIDE the VISIBLE media frame and below top nav
-        const minTop = Math.max(vis.top + 2, topNavHeight + 4);
-        const maxTop = vis.bottom - height - 2;
-        const minLeft = vis.left + 2;
-        const maxLeft = vis.right - width - 2;
-
-        if (maxTop < minTop) {
+        // 2. Viewport Boundaries:
+        if (top + height > window.innerHeight - 4 || left < 2 || left + width > window.innerWidth - 2) {
             container.style.display = 'none';
             container.style.visibility = 'hidden';
             return;
         }
 
-        top = Math.max(minTop, Math.min(top, maxTop));
-        left = Math.max(minLeft, Math.min(left, maxLeft));
-
-        // Absolute hard barrier: buttons must NEVER be placed inside or above navbar on feed/groups/profile
-        if (!isImmersive && top < topNavHeight + 4) {
+        // 3. Overflow container / ancestor clipping:
+        const vis = media ? this._getVisibleRect(media) : rect;
+        if (top < vis.top - 2 || top + height > vis.bottom + 2 || left < vis.left - 2 || left + width > vis.right + 2) {
             container.style.display = 'none';
             container.style.visibility = 'hidden';
             return;
@@ -787,9 +777,11 @@ class OverlayManager {
             container.style.pointerEvents = 'auto';
         }
 
-        const corner = this.pickBestCorner(media, rect, container);
-        entry.corner = corner;
-        this.applyCornerPosition(rect, container, corner, media);
+        // Lock corner on first placement so buttons never jump down across corners on scroll!
+        if (!entry.corner) {
+            entry.corner = this.pickBestCorner(media, rect, container);
+        }
+        this.applyCornerPosition(rect, container, entry.corner, media);
     }
 
     updateAllPositions() {
