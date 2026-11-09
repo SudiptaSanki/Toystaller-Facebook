@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Toystaller - Facebook Video Player</title>
+  <title>Toystaller - Facebook HD Video Player</title>
   <link rel="icon" type="image/png" href="Toystaller_logo.png">
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -15,7 +15,7 @@
       display: flex;
       flex-direction: column;
       align-items: center;
-      justify-content: center;
+      justify-content: space-between;
       overflow-x: hidden;
     }
     .header {
@@ -24,8 +24,9 @@
       left: 0;
       right: 0;
       height: 56px;
-      background: rgba(18, 19, 23, 0.88);
-      backdrop-filter: blur(12px);
+      background: rgba(18, 19, 23, 0.92);
+      backdrop-filter: blur(14px);
+      -webkit-backdrop-filter: blur(14px);
       display: flex;
       align-items: center;
       justify-content: space-between;
@@ -92,29 +93,60 @@
     }
     .player-container {
       margin-top: 56px;
-      padding: 20px;
-      max-width: 95vw;
-      max-height: calc(100vh - 80px);
+      padding: 20px 24px 30px;
+      width: 100%;
+      flex: 1;
       display: flex;
       flex-direction: column;
       align-items: center;
       justify-content: center;
     }
+    .video-frame-wrapper {
+      position: relative;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      width: 100%;
+      max-width: 95vw;
+      max-height: calc(100vh - 140px);
+    }
     video {
-      max-width: 90vw;
-      max-height: 80vh;
       border-radius: 12px;
-      box-shadow: 0 12px 40px rgba(0, 0, 0, 0.85);
+      box-shadow: 0 16px 48px rgba(0, 0, 0, 0.85);
       background: #000;
       outline: none;
+      object-fit: contain;
+      transition: width 0.2s ease, height 0.2s ease;
+    }
+    video.horizontal {
+      width: min(92vw, 1360px);
+      max-height: calc(100vh - 140px);
+      height: auto;
+    }
+    video.vertical {
+      height: calc(100vh - 140px);
+      max-width: 90vw;
+      width: auto;
+      aspect-ratio: 9/16;
+    }
+    video.square {
+      width: min(80vh, 85vw);
+      height: min(80vh, 85vw);
     }
     .info {
       margin-top: 14px;
-      font-size: 12px;
+      font-size: 13px;
       color: #8a8d91;
       display: flex;
       align-items: center;
       gap: 16px;
+    }
+    .info-pill {
+      background: rgba(255, 255, 255, 0.06);
+      padding: 3px 10px;
+      border-radius: 12px;
+      color: #4cd137;
+      font-weight: 600;
     }
   </style>
 </head>
@@ -132,21 +164,24 @@
       </button>
       <button id="dlBtn" class="btn btn-primary">
         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
-        Download Video
+        Download HD Video
       </button>
     </div>
   </div>
 
   <div class="player-container">
-    <video id="videoPlayer" controls autoplay playsinline></video>
+    <div class="video-frame-wrapper">
+      <video id="videoPlayer" controls autoplay playsinline class="horizontal"></video>
+    </div>
     <div class="info">
-      <span id="resolutionText">HD MP4 Stream</span>
+      <span id="resolutionText">Master HD MP4 Stream</span>
       <span>•</span>
-      <span>Direct Master Audio + Video</span>
+      <span class="info-pill" id="qualityPill">Original Quality</span>
+      <span>•</span>
+      <span>Direct Audio + Video</span>
     </div>
   </div>
 
   <script src="player.js"></script>
 </body>
 </html>
-

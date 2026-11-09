@@ -86,13 +86,25 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                         lowerUrl.includes('mime=video') ||
                         lowerUrl.includes('/v/t42.') ||
                         lowerUrl.includes('/v/t64.');
-        if (isVideo) {
-            const playerUrl = chrome.runtime.getURL('player.html') + '?url=' + encodeURIComponent(url);
-            chrome.tabs.create({ url: playerUrl });
-        } else {
-            chrome.tabs.create({ url: url });
+        const targetUrl = isVideo ? (chrome.runtime.getURL('player.html') + '?url=' + encodeURIComponent(url)) : url;
+        const tabProps = { url: targetUrl };
+        if (sender.tab && sender.tab.windowId) {
+            tabProps.windowId = sender.tab.windowId;
+            if (typeof sender.tab.index === 'number') tabProps.index = sender.tab.index + 1;
         }
+        chrome.tabs.create(tabProps, (createdTab) => {
+            if (chrome.runtime.lastError) {
+                console.warn("Toystaller: tabs.create failed, falling back in same window:", chrome.runtime.lastError.message);
+                const fallbackProps = { url: url || targetUrl };
+                if (sender.tab && sender.tab.windowId) {
+                    fallbackProps.windowId = sender.tab.windowId;
+                    if (typeof sender.tab.index === 'number') fallbackProps.index = sender.tab.index + 1;
+                }
+                chrome.tabs.create(fallbackProps);
+            }
+        });
         sendResponse({ success: true });
+        return true;
     }
 });
 

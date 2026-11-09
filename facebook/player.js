@@ -11,6 +11,7 @@
     const dlBtn = document.getElementById('dlBtn');
     const copyBtn = document.getElementById('copyBtn');
     const resText = document.getElementById('resolutionText');
+    const qualityPill = document.getElementById('qualityPill');
 
     if (!videoUrl) {
         document.body.innerHTML = `
@@ -25,14 +26,41 @@
     player.src = videoUrl;
 
     player.addEventListener('loadedmetadata', () => {
-        if (player.videoWidth && player.videoHeight) {
-            resText.textContent = `${player.videoWidth} x ${player.videoHeight} • HD MP4`;
+        const w = player.videoWidth;
+        const h = player.videoHeight;
+        if (w && h) {
+            if (w > h * 1.15) {
+                player.className = 'horizontal';
+            } else if (h > w * 1.15) {
+                player.className = 'vertical';
+            } else {
+                player.className = 'square';
+            }
+
+            let qualityTag = 'HD MP4';
+            if (w >= 1920 || h >= 1920) qualityTag = 'Full HD (1080p)';
+            else if (w >= 1280 || h >= 1280) qualityTag = 'HD (720p)';
+            else if (w >= 850 || h >= 850) qualityTag = 'HQ (480p)';
+            else qualityTag = 'SD MP4';
+
+            if (resText) {
+                resText.textContent = `${w} × ${h} • ${qualityTag}`;
+            }
+            if (qualityPill) {
+                qualityPill.textContent = (w >= 1280 || h >= 1280) ? 'Master HD' : 'Direct Stream';
+            }
         }
     });
 
     player.addEventListener('error', () => {
-        resText.textContent = 'Unable to stream directly. Please click "Download Video" above to save the file.';
-        resText.style.color = '#e74c3c';
+        if (videoUrl && !videoUrl.startsWith('blob:') && !videoUrl.startsWith('data:')) {
+            window.location.replace(videoUrl);
+        } else {
+            if (resText) {
+                resText.textContent = 'Unable to stream directly. Please click "Download HD Video" above to save the file.';
+                resText.style.color = '#e74c3c';
+            }
+        }
     });
 
     dlBtn.addEventListener('click', () => {
@@ -58,7 +86,7 @@
                             <polyline points="7 10 12 15 17 10"></polyline>
                             <line x1="12" y1="15" x2="12" y2="3"></line>
                         </svg>
-                        Download Video
+                        Download HD Video
                     `;
                 }, 2500);
             }
@@ -80,4 +108,3 @@
         });
     });
 })();
-
