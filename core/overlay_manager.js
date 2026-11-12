@@ -390,11 +390,35 @@ class OverlayManager {
     addOverlay(media, createButtonsFn) {
         if (this.overlays.has(media)) return;
 
-        // Deduplication: prevent multiple overlays on overlapping images (e.g. blur placeholder + actual photo)
+        const hoverHost = this._findHoverHost(media);
+
+        // Deduplication: prevent multiple overlays on the same photo tile or overlapping elements
         const mRect = media.getBoundingClientRect();
-        if (mRect.width > 0 && mRect.height > 0) {
-            for (const [existingMedia, existingEntry] of this.overlays.entries()) {
-                if (existingMedia === media) return;
+        for (const [existingMedia, existingEntry] of this.overlays.entries()) {
+            if (existingMedia === media) return;
+
+            // 1. Shared hoverHost tile deduplication (e.g. blur placeholder + sharp photo inside same tile)
+            if (hoverHost && existingEntry.hoverHost && hoverHost === existingEntry.hoverHost) {
+                const mRes = (media.naturalWidth || 0) * (media.naturalHeight || 0);
+                const eRes = (existingMedia.naturalWidth || 0) * (existingMedia.naturalHeight || 0);
+                if (mRes > eRes && mRes > 20000) {
+                    existingEntry.container.remove();
+                    if (existingEntry.resizeObserver) existingEntry.resizeObserver.disconnect();
+                    if (existingEntry.intersectionObserver) existingEntry.intersectionObserver.disconnect();
+                    this.overlays.delete(existingMedia);
+                    break;
+                } else {
+                    return; // Existing overlay is already on the tile!
+                }
+            }
+
+            // 2. Ancestor/child containment deduplication
+            if (existingMedia.contains(media) || media.contains(existingMedia)) {
+                return;
+            }
+
+            // 3. Spatial bounding box overlap deduplication
+            if (mRect.width > 0 && mRect.height > 0) {
                 const eRect = existingMedia.getBoundingClientRect();
                 const intersectL = Math.max(mRect.left, eRect.left);
                 const intersectT = Math.max(mRect.top, eRect.top);
@@ -407,18 +431,15 @@ class OverlayManager {
                 const eArea = eRect.width * eRect.height;
 
                 if (mArea > 0 && eArea > 0 && (iArea / mArea > 0.55 || iArea / eArea > 0.55)) {
-                    // Both media elements cover the exact same visual photo card
                     const mRes = (media.naturalWidth || 0) * (media.naturalHeight || 0);
                     const eRes = (existingMedia.naturalWidth || 0) * (existingMedia.naturalHeight || 0);
                     if (mRes > eRes) {
-                        // Replace lower-res placeholder overlay with higher-res overlay
                         existingEntry.container.remove();
                         if (existingEntry.resizeObserver) existingEntry.resizeObserver.disconnect();
                         if (existingEntry.intersectionObserver) existingEntry.intersectionObserver.disconnect();
                         this.overlays.delete(existingMedia);
                         break;
                     } else {
-                        // Existing overlay is already on the better element
                         return;
                     }
                 }
@@ -451,8 +472,6 @@ class OverlayManager {
         });
 
         document.body.appendChild(container);
-
-        const hoverHost = this._findHoverHost(media);
         const hostShow = () => {
             const entry = this.overlays.get(media);
             if (entry) {
@@ -694,7 +713,7 @@ class OverlayManager {
         // As media scrolls, keep button locked in place! When its corner reaches the top navbar,
         // HIDE it gracefully — NEVER dynamically jump down to bottom-right!
         if (!isImmersive) {
-            if (top < topNavHeight + 4) {
+            if (top < topNavHeight + 4 || rect.top < topNavHeight - 8 || rect.bottom <= topNavHeight + 12) {
                 container.style.display = 'none';
                 container.style.visibility = 'hidden';
                 return;
@@ -777,7 +796,7 @@ class OverlayManager {
         const topNavHeight = inModal ? 0 : this._getTopNavHeight();
 
         // If media has scrolled behind top navbar or off screen
-        if (rect.bottom <= topNavHeight + 8) {
+        if (rect.bottom <= topNavHeight + 12 || (!inModal && rect.top < topNavHeight - 8)) {
             container.style.display = 'none';
             container.style.visibility = 'hidden';
             container.style.pointerEvents = 'none';

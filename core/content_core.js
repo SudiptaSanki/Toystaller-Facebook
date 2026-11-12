@@ -128,6 +128,9 @@ function isValidVideoUrl(url) {
     if (lower.includes('unified_cvc')) return false;
     if (lower.includes('.m3u8') || lower.includes('.mpd') || lower.includes('stream_type=dash')) return false;
     
+    // Reject audio-only streams
+    if (lower.includes('dash_audio') || lower.includes('_audio_')) return false;
+
     // Reject image extensions & covers
     if (lower.includes('.jpg') || lower.includes('.jpeg') || lower.includes('.png') || lower.includes('.webp') || lower.includes('videocover') || lower.includes('/t15.')) {
         return false;
@@ -140,16 +143,64 @@ function isValidVideoUrl(url) {
     return isCdn && (isVideoExt || isVideoPath);
 }
 
+function parseStreamMetadata(url) {
+    if (!url || typeof url !== 'string') return null;
+    let videoId = null;
+    let vencodeTag = '';
+    let bitrate = 0;
+    try {
+        const m = url.match(/[?&]efg=([^&]+)/);
+        if (m) {
+            let b64 = decodeURIComponent(m[1]).replace(/-/g, '+').replace(/_/g, '/');
+            while (b64.length % 4) b64 += '=';
+            const decoded = JSON.parse(atob(b64));
+            if (decoded) {
+                if (decoded.video_id) videoId = String(decoded.video_id).trim();
+                if (decoded.vencode_tag) vencodeTag = String(decoded.vencode_tag).toLowerCase();
+                if (decoded.bitrate) bitrate = Number(decoded.bitrate) || 0;
+            }
+        }
+    } catch(e) {}
+
+    const lower = url.toLowerCase();
+    const isAudio = vencodeTag.includes('audio') || 
+                    vencodeTag.includes('dash_a') || 
+                    lower.includes('dash_audio') || 
+                    lower.includes('_audio_') || 
+                    (bitrate > 0 && bitrate < 200000 && !vencodeTag.includes('baseline') && !vencodeTag.includes('video'));
+
+    const isVideo = !isAudio && (
+        vencodeTag.includes('baseline') || 
+        vencodeTag.includes('video') || 
+        vencodeTag.includes('dash_v') || 
+        bitrate >= 200000 || 
+        lower.includes('.mp4') || 
+        lower.includes('.m4v')
+    );
+
+    return { videoId, vencodeTag, bitrate, isAudio, isVideo };
+}
+
 function scoreVideoUrl(url) {
     let score = 0;
     const lower = (url || '').toLowerCase();
     
+    // Explicit audio track check: audio streams must NEVER be chosen as video!
+    const meta = parseStreamMetadata(url);
+    if (meta && meta.isAudio) return -10000;
+    if (lower.includes('dash_audio') || lower.includes('_audio_')) return -10000;
+
     // Master HD Progressive Streams (highest priority)
     if (lower.includes('playable_url_quality_hd')) score += 200;
     if (lower.includes('browser_native_hd_url')) score += 180;
     if (lower.includes('quality_hd') || lower.includes('_hd') || lower.includes('native_hd')) score += 120;
     if (lower.includes('/v/t64.') || lower.includes('/v/t39.')) score += 80;
     if (lower.includes('video.fbcdn.net')) score += 20;
+
+    // DASH Master Video Stream with bitrate evaluation
+    if (meta && meta.isVideo) {
+        score += 100 + Math.min((meta.bitrate || 0) / 20000, 70);
+    }
 
     // Explicit resolution markers
     if (lower.includes('1080')) score += 60;
@@ -163,11 +214,10 @@ function scoreVideoUrl(url) {
     if (lower.includes('.mp4') || lower.includes('.m4v')) score += 10;
     
     // Low-bitrate preview stream (/v/t42.) - Meta's 360p/480p preview cluster:
-    // Heavy penalty so it is NEVER preferred over HD!
     if (lower.includes('/v/t42.')) score -= 120;
     
     // DASH manifests & segmented playlists (cannot be played directly in browser as single MP4 file)
-    if (lower.includes('.m3u8') || lower.includes('.mpd') || lower.includes('/playlist/') || lower.includes('/manifest/') || lower.includes('stream_type=dash') || lower.includes('dash')) {
+    if (lower.includes('.m3u8') || lower.includes('.mpd') || lower.includes('/playlist/') || lower.includes('/manifest/') || lower.includes('stream_type=dash')) {
         score -= 500;
     }
     
@@ -248,8 +298,27 @@ function injectDownloadButtons() {
         // If a modal is open, strictly ignore any media not inside the modal
         if (hasModal && !platform.isInsideModal(media)) return;
 
+        const isVideo = media.tagName.toLowerCase() === 'video';
+
+        // Photo tile deduplication: if this media is an image inside a photo tile that already has an overlay, skip!
+        if (!isVideo) {
+            const tile = media.closest ? media.closest('a[href*="/photo"], a[href*="/photos/"], a[href*="photo.php"], div[data-visualcompletion*="media"], div.x10l6tqk, div[role="button"][tabindex]') : null;
+            if (tile) {
+                if (tile.__toystallerBoundMedia && tile.__toystallerBoundMedia.isConnected && tile.__toystallerBoundMedia !== media) {
+                    return;
+                }
+                tile.__toystallerBoundMedia = media;
+            }
+
+            const cls = (media.className && typeof media.className === 'string') ? media.className.toLowerCase() : '';
+            if (cls.includes('blur') || (media.getAttribute('aria-hidden') === 'true')) {
+                if (media.parentElement && media.parentElement.querySelector('img:not([aria-hidden="true"])')) {
+                    return;
+                }
+            }
+        }
+
         if (window.magicOverlayManager && !window.magicOverlayManager.overlays.has(media)) {
-            const isVideo = media.tagName.toLowerCase() === 'video';
             const magicId = Math.random().toString(36).substring(2, 15);
             if (isVideo) {
                 media.dataset.magicId = magicId;
@@ -365,10 +434,11 @@ function injectDownloadButtons() {
                             safeSendMessage({ action: 'openInNewTab', url: getHighResImageUrl() });
                         }, 250);
                     } else {
-                        const openVideo = (url) => {
+                        const openVideo = (url, audioUrl) => {
                             const clean = cleanVideoUrl(url);
+                            const cleanAudio = cleanVideoUrl(audioUrl);
                             if (clean && isValidVideoUrl(clean)) {
-                                safeSendMessage({ action: 'openInNewTab', url: clean, isVideo: true });
+                                safeSendMessage({ action: 'openInNewTab', url: clean, audioUrl: cleanAudio, isVideo: true });
                             } else {
                                 alert('Could not find the HD video URL yet.\n\nTip: Make sure the video has started playing, then click the button again.');
                             }
@@ -381,18 +451,19 @@ function injectDownloadButtons() {
                             if (openBtn.__resolvedVideoId && currentId && openBtn.__resolvedVideoId !== currentId) {
                                 // User scrolled to a new reel or video! Clear stale cache
                                 delete openBtn.__resolvedVideoUrl;
+                                delete openBtn.__resolvedAudioUrl;
                                 delete openBtn.__resolvedVideoId;
                             } else {
-                                openVideo(openBtn.__resolvedVideoUrl);
+                                openVideo(openBtn.__resolvedVideoUrl, openBtn.__resolvedAudioUrl);
                                 return;
                             }
                         }
 
                         // Fresh resolution for this specific video
                         openBtn.style.opacity = '0.35';
-                        getMediaUrl((url) => {
+                        getMediaUrl((url, audioUrl) => {
                             openBtn.style.opacity = '1';
-                            openVideo(url);
+                            openVideo(url, audioUrl);
                         }, false, currentId);
                     }
                 });
@@ -473,10 +544,11 @@ function injectDownloadButtons() {
             const preResolveVideoUrl = (openBtn) => {
                 if (!isVideo) return;
                 const currentId = platform.extractVideoId ? platform.extractVideoId(media) : null;
-                getMediaUrl((url) => {
+                getMediaUrl((url, audioUrl) => {
                     const clean = cleanVideoUrl(url);
                     if (clean && isValidVideoUrl(clean)) {
                         openBtn.__resolvedVideoUrl = clean;
+                        openBtn.__resolvedAudioUrl = cleanVideoUrl(audioUrl);
                         openBtn.__resolvedVideoId = currentId;
                         openBtn.style.display = 'flex';
                     }
@@ -493,8 +565,9 @@ function injectDownloadButtons() {
                         resolved = true;
                         window.removeEventListener('message', handler);
                         const clean = cleanVideoUrl(e.data.url);
+                        const cleanAudio = cleanVideoUrl(e.data.audioUrl);
                         if (clean && isValidVideoUrl(clean)) {
-                            callback(clean);
+                            callback(clean, cleanAudio);
                         } else {
                             getMediaUrlFallback(callback, silent, currentId);
                         }

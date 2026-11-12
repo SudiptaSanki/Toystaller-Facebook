@@ -10,26 +10,73 @@
     window.__toystallerInterceptorLoaded = true;
 
     // --- Video Store by Video ID & MRU History ---
-    // Maps videoId -> { id, hd, sd, allUrls: Set, timestamp }
+    // Maps videoId -> { id, hd, sd, dashVideo, dashVideoBitrate, dashAudio, dashAudioBitrate, allUrls: Set, timestamp }
     const videoStoreById = new Map();
     const recentVideosMRU = []; // Ordered list of videoIds, most recent first (max 50)
     const recentUrlsPool = []; // Recent valid video URLs regardless of ID (max 50)
 
+    function parseStreamMetadata(url) {
+        if (!url || typeof url !== 'string') return null;
+        let videoId = null;
+        let vencodeTag = '';
+        let bitrate = 0;
+        try {
+            const m = url.match(/[?&]efg=([^&]+)/);
+            if (m) {
+                let b64 = decodeURIComponent(m[1]).replace(/-/g, '+').replace(/_/g, '/');
+                while (b64.length % 4) b64 += '=';
+                const decoded = JSON.parse(atob(b64));
+                if (decoded) {
+                    if (decoded.video_id) videoId = String(decoded.video_id).trim();
+                    if (decoded.vencode_tag) vencodeTag = String(decoded.vencode_tag).toLowerCase();
+                    if (decoded.bitrate) bitrate = Number(decoded.bitrate) || 0;
+                }
+            }
+        } catch(e) {}
+
+        const lower = url.toLowerCase();
+        const isAudio = vencodeTag.includes('audio') || 
+                        vencodeTag.includes('dash_a') || 
+                        lower.includes('dash_audio') || 
+                        lower.includes('_audio_') || 
+                        (bitrate > 0 && bitrate < 200000 && !vencodeTag.includes('baseline') && !vencodeTag.includes('video'));
+
+        const isVideo = !isAudio && (
+            vencodeTag.includes('baseline') || 
+            vencodeTag.includes('video') || 
+            vencodeTag.includes('dash_v') || 
+            bitrate >= 200000 || 
+            lower.includes('.mp4') || 
+            lower.includes('.m4v')
+        );
+
+        return { videoId, vencodeTag, bitrate, isAudio, isVideo };
+    }
+
     function recordVideoEntry(videoId, hdUrl, sdUrl, extraUrl) {
         if (!videoId && !hdUrl && !sdUrl && !extraUrl) return;
-        const id = videoId ? String(videoId).trim() : null;
 
-        const bestUrl = hdUrl || sdUrl || extraUrl;
-        if (bestUrl && isValidVideo(bestUrl)) {
-            const idx = recentUrlsPool.indexOf(bestUrl);
-            if (idx !== -1) recentUrlsPool.splice(idx, 1);
-            recentUrlsPool.unshift(bestUrl);
-            if (recentUrlsPool.length > 50) recentUrlsPool.pop();
+        let detectedId = videoId ? String(videoId).trim() : null;
+        let parsed = extraUrl ? parseStreamMetadata(extraUrl) : null;
+        if (!detectedId && parsed && parsed.videoId) {
+            detectedId = parsed.videoId;
         }
+
+        const id = detectedId;
 
         let entry = id ? videoStoreById.get(id) : null;
         if (!entry) {
-            entry = { id: id, hd: null, sd: null, allUrls: new Set(), timestamp: Date.now() };
+            entry = { 
+                id: id, 
+                hd: null, 
+                sd: null, 
+                dashVideo: null, 
+                dashVideoBitrate: 0, 
+                dashAudio: null, 
+                dashAudioBitrate: 0, 
+                allUrls: new Set(), 
+                timestamp: Date.now() 
+            };
             if (id) {
                 videoStoreById.set(id, entry);
                 const idx = recentVideosMRU.indexOf(id);
@@ -43,11 +90,42 @@
         }
 
         entry.timestamp = Date.now();
-        if (hdUrl && isValidVideo(hdUrl)) entry.hd = hdUrl;
-        if (sdUrl && isValidVideo(sdUrl)) entry.sd = sdUrl;
-        if (extraUrl && isValidVideo(extraUrl)) entry.allUrls.add(extraUrl);
-        if (entry.hd) entry.allUrls.add(entry.hd);
-        if (entry.sd) entry.allUrls.add(entry.sd);
+
+        if (hdUrl && isValidVideo(hdUrl)) {
+            entry.hd = hdUrl;
+            entry.allUrls.add(hdUrl);
+        }
+        if (sdUrl && isValidVideo(sdUrl)) {
+            entry.sd = sdUrl;
+            entry.allUrls.add(sdUrl);
+        }
+
+        if (extraUrl) {
+            if (!parsed) parsed = parseStreamMetadata(extraUrl);
+            if (parsed && parsed.isAudio) {
+                if (!entry.dashAudio || (parsed.bitrate && parsed.bitrate > entry.dashAudioBitrate)) {
+                    entry.dashAudio = extraUrl;
+                    entry.dashAudioBitrate = parsed.bitrate;
+                }
+            } else if (isValidVideo(extraUrl)) {
+                entry.allUrls.add(extraUrl);
+                if (!parsed || parsed.isVideo) {
+                    const br = parsed ? parsed.bitrate : 0;
+                    if (!entry.dashVideo || br > entry.dashVideoBitrate) {
+                        entry.dashVideo = extraUrl;
+                        entry.dashVideoBitrate = br;
+                    }
+                }
+            }
+        }
+
+        const bestVideo = entry.hd || entry.dashVideo || entry.sd;
+        if (bestVideo && isValidVideo(bestVideo)) {
+            const idx = recentUrlsPool.indexOf(bestVideo);
+            if (idx !== -1) recentUrlsPool.splice(idx, 1);
+            recentUrlsPool.unshift(bestVideo);
+            if (recentUrlsPool.length > 50) recentUrlsPool.pop();
+        }
     }
 
     // --- Monkey-patch history pushState / replaceState for Instant Reel Navigation Detection ---
@@ -175,15 +253,25 @@
         while ((cdnM = cdnRegex.exec(clean)) !== null) {
             try {
                 const url = cleanVideoUrl(JSON.parse('"' + cdnM[1] + '"'));
-                if (url && isValidVideo(url)) {
-                    foundUrls.add(url);
-                    recordVideoEntry(null, null, null, url);
+                if (url) {
+                    const meta = parseStreamMetadata(url);
+                    if (meta && meta.isAudio) {
+                        recordVideoEntry(meta.videoId, null, null, url);
+                    } else if (isValidVideo(url)) {
+                        foundUrls.add(url);
+                        recordVideoEntry(meta ? meta.videoId : null, null, null, url);
+                    }
                 }
             } catch(e) {
                 const unescaped = cleanVideoUrl(cdnM[1]);
-                if (unescaped && isValidVideo(unescaped)) {
-                    foundUrls.add(unescaped);
-                    recordVideoEntry(null, null, null, unescaped);
+                if (unescaped) {
+                    const meta = parseStreamMetadata(unescaped);
+                    if (meta && meta.isAudio) {
+                        recordVideoEntry(meta.videoId, null, null, unescaped);
+                    } else if (isValidVideo(unescaped)) {
+                        foundUrls.add(unescaped);
+                        recordVideoEntry(meta ? meta.videoId : null, null, null, unescaped);
+                    }
                 }
             }
         }
@@ -469,28 +557,41 @@
         }
 
         let url = null;
+        let audioUrl = null;
 
         if (isVideo) {
             // 1. If videoId was provided, check the video store first
             if (requestedVideoId && videoStoreById.has(requestedVideoId)) {
                 const entry = videoStoreById.get(requestedVideoId);
-                if (entry.hd) url = entry.hd;
-                else if (entry.sd) url = entry.sd;
+                if (entry.hd) {
+                    url = entry.hd;
+                } else if (entry.dashVideo) {
+                    url = entry.dashVideo;
+                    audioUrl = entry.dashAudio;
+                } else if (entry.sd) {
+                    url = entry.sd;
+                }
             }
 
-            // 2. Walk the React Fiber component hierarchy
-            if (!url && el) {
-                url = extractVideoUrlFromFiberTree(el);
-            }
-
-            // 3. Check current Reel ID from URL if on /reel/
+            // 2. Check current Reel ID from URL if on /reel/
             if (!url && window.location.pathname.includes('/reel/')) {
                 const m = window.location.pathname.match(/\/reel\/(\d+)/);
                 if (m && m[1] && videoStoreById.has(m[1])) {
                     const entry = videoStoreById.get(m[1]);
-                    if (entry.hd) url = entry.hd;
-                    else if (entry.sd) url = entry.sd;
+                    if (entry.hd) {
+                        url = entry.hd;
+                    } else if (entry.dashVideo) {
+                        url = entry.dashVideo;
+                        audioUrl = entry.dashAudio;
+                    } else if (entry.sd) {
+                        url = entry.sd;
+                    }
                 }
+            }
+
+            // 3. Walk the React Fiber component hierarchy
+            if (!url && el) {
+                url = extractVideoUrlFromFiberTree(el);
             }
 
             // 4. Platform DOM / Script lookup matched to Video ID
@@ -501,9 +602,16 @@
                 }
             }
 
-            // 5. Check recent intercepted video URLs pool
-            if (!url && recentUrlsPool.length > 0) {
-                url = recentUrlsPool[0];
+            // If we have a video URL, resolve companion audio track if present
+            if (url && !audioUrl) {
+                const meta = parseStreamMetadata(url);
+                const vid = (meta && meta.videoId) || requestedVideoId;
+                if (vid && videoStoreById.has(vid)) {
+                    const entry = videoStoreById.get(vid);
+                    if (entry.dashAudio) {
+                        audioUrl = entry.dashAudio;
+                    }
+                }
             }
         } else {
             if (el) {
@@ -511,14 +619,21 @@
             }
         }
 
-        // Guarantee non-video internal URLs are never sent back for video requests
-        if (isVideo && url && !isValidVideo(url)) {
-            url = null;
+        // Guarantee audio-only streams are NEVER sent back as the main video URL!
+        if (isVideo && url) {
+            const meta = parseStreamMetadata(url);
+            if (meta && meta.isAudio) {
+                audioUrl = url;
+                url = null;
+            } else if (!isValidVideo(url)) {
+                url = null;
+            }
         }
 
         window.postMessage({
             type: 'magic_response_react_url_' + reqId,
-            url: url
+            url: url,
+            audioUrl: audioUrl
         }, '*');
     });
 

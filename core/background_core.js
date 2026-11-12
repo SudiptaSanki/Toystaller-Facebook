@@ -77,6 +77,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         return true;
     } else if (request.action === 'openInNewTab') {
         const url = request.url || '';
+        const audioUrl = request.audioUrl || '';
         const lowerUrl = url.toLowerCase();
         const isVideo = request.isVideo || 
                         lowerUrl.includes('.mp4') || 
@@ -86,7 +87,13 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                         lowerUrl.includes('mime=video') ||
                         lowerUrl.includes('/v/t42.') ||
                         lowerUrl.includes('/v/t64.');
-        const targetUrl = isVideo ? (chrome.runtime.getURL('player.html') + '?url=' + encodeURIComponent(url)) : url;
+        let targetUrl = url;
+        if (isVideo) {
+            targetUrl = chrome.runtime.getURL('player.html') + '?url=' + encodeURIComponent(url);
+            if (audioUrl) {
+                targetUrl += '&audio=' + encodeURIComponent(audioUrl);
+            }
+        }
         const tabProps = { url: targetUrl };
         if (sender.tab && sender.tab.windowId) {
             tabProps.windowId = sender.tab.windowId;

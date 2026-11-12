@@ -8,11 +8,20 @@ function bootToystaller() {
     if (toystallerBooted) return;
     toystallerBooted = true;
 
-    // Inject platforms/facebook.js and page_interceptor.js into the MAIN world
-    const scriptsToInject = [
-        'platforms/facebook.js',
-        'page_interceptor.js'
-    ];
+    // Inject platform config and page interceptor into the MAIN world
+    // Dynamically handles both root and packaged subfolder directory structures
+    const scriptsToInject = [];
+    try {
+        const manifest = chrome.runtime.getManifest();
+        const resources = (manifest.web_accessible_resources && manifest.web_accessible_resources[0] && manifest.web_accessible_resources[0].resources) || [];
+        if (resources.includes('platform.js')) {
+            scriptsToInject.push('platform.js', 'core/interceptor_core.js');
+        } else {
+            scriptsToInject.push('platforms/facebook.js', 'page_interceptor.js');
+        }
+    } catch (e) {
+        scriptsToInject.push('platforms/facebook.js', 'page_interceptor.js');
+    }
 
     let currentScriptIdx = 0;
     const injectNext = () => {
@@ -39,14 +48,38 @@ function bootToystaller() {
 
 const pageInterceptedVideoUrls = new Set();
 window.addEventListener('message', (e) => {
-    if (e.data && e.data.type === 'toystaller_video_urls' && Array.isArray(e.data.urls)) {
+    if (!e.data) return;
+    if (e.data.type === 'toystaller_video_urls' && Array.isArray(e.data.urls)) {
         e.data.urls.forEach(url => {
             if (isValidVideoUrl(url)) {
                 pageInterceptedVideoUrls.add(url);
             }
         });
+    } else if (e.data.type === 'toystaller_url_changed') {
+        // User scrolled to another Reel or navigated via SPA!
+        // Clear all cached resolutions on open buttons so each button maps to the active video
+        document.querySelectorAll('.magic-open-btn').forEach(btn => {
+            delete btn.__resolvedVideoUrl;
+            delete btn.__resolvedVideoId;
+        });
+        if (window.magicOverlayManager) {
+            window.magicOverlayManager.updateAllPositions();
+        }
+        setTimeout(injectDownloadButtons, 120);
     }
 });
+
+// Throttled scroll listener to invalidate stale button caches as user scrolls
+let lastKnownHref = window.location.href;
+window.addEventListener('scroll', () => {
+    if (window.location.href !== lastKnownHref) {
+        lastKnownHref = window.location.href;
+        document.querySelectorAll('.magic-open-btn').forEach(btn => {
+            delete btn.__resolvedVideoUrl;
+            delete btn.__resolvedVideoId;
+        });
+    }
+}, { passive: true });
 
 // Safe wrapper for chrome.runtime.sendMessage to prevent
 // "Extension context invalidated" errors after extension reload
@@ -95,6 +128,9 @@ function isValidVideoUrl(url) {
     if (lower.includes('unified_cvc')) return false;
     if (lower.includes('.m3u8') || lower.includes('.mpd') || lower.includes('stream_type=dash')) return false;
     
+    // Reject audio-only streams
+    if (lower.includes('dash_audio') || lower.includes('_audio_')) return false;
+
     // Reject image extensions & covers
     if (lower.includes('.jpg') || lower.includes('.jpeg') || lower.includes('.png') || lower.includes('.webp') || lower.includes('videocover') || lower.includes('/t15.')) {
         return false;
@@ -107,26 +143,90 @@ function isValidVideoUrl(url) {
     return isCdn && (isVideoExt || isVideoPath);
 }
 
+function parseStreamMetadata(url) {
+    if (!url || typeof url !== 'string') return null;
+    let videoId = null;
+    let vencodeTag = '';
+    let bitrate = 0;
+    try {
+        const m = url.match(/[?&]efg=([^&]+)/);
+        if (m) {
+            let b64 = decodeURIComponent(m[1]).replace(/-/g, '+').replace(/_/g, '/');
+            while (b64.length % 4) b64 += '=';
+            const decoded = JSON.parse(atob(b64));
+            if (decoded) {
+                if (decoded.video_id) videoId = String(decoded.video_id).trim();
+                if (decoded.vencode_tag) vencodeTag = String(decoded.vencode_tag).toLowerCase();
+                if (decoded.bitrate) bitrate = Number(decoded.bitrate) || 0;
+            }
+        }
+    } catch(e) {}
+
+    const lower = url.toLowerCase();
+    const isAudio = vencodeTag.includes('audio') || 
+                    vencodeTag.includes('dash_a') || 
+                    lower.includes('dash_audio') || 
+                    lower.includes('_audio_') || 
+                    (bitrate > 0 && bitrate < 200000 && !vencodeTag.includes('baseline') && !vencodeTag.includes('video'));
+
+    const isVideo = !isAudio && (
+        vencodeTag.includes('baseline') || 
+        vencodeTag.includes('video') || 
+        vencodeTag.includes('dash_v') || 
+        bitrate >= 200000 || 
+        lower.includes('.mp4') || 
+        lower.includes('.m4v')
+    );
+
+    return { videoId, vencodeTag, bitrate, isAudio, isVideo };
+}
+
 function scoreVideoUrl(url) {
     let score = 0;
-    const lower = url.toLowerCase();
-    if (lower.includes('.mp4') || lower.includes('.m4v')) score += 15;
-    if (lower.includes('quality_hd') || lower.includes('_hd') || lower.includes('native_hd')) score += 30;
+    const lower = (url || '').toLowerCase();
+    
+    // Explicit audio track check: audio streams must NEVER be chosen as video!
+    const meta = parseStreamMetadata(url);
+    if (meta && meta.isAudio) return -10000;
+    if (lower.includes('dash_audio') || lower.includes('_audio_')) return -10000;
+
+    // Master HD Progressive Streams (highest priority)
+    if (lower.includes('playable_url_quality_hd')) score += 200;
+    if (lower.includes('browser_native_hd_url')) score += 180;
+    if (lower.includes('quality_hd') || lower.includes('_hd') || lower.includes('native_hd')) score += 120;
+    if (lower.includes('/v/t64.') || lower.includes('/v/t39.')) score += 80;
     if (lower.includes('video.fbcdn.net')) score += 20;
-    if (lower.includes('.m3u8') || lower.includes('.mpd') || lower.includes('/playlist/') || lower.includes('/manifest/') || lower.includes('stream_type=dash') || lower.includes('dash')) score -= 50;
-    
-    // Aggressive scoring for HD resolutions
-    if (lower.includes('1080')) score += 25;
-    else if (lower.includes('720')) score += 15;
-    else if (lower.includes('480')) score += 5;
-    else if (lower.includes('360')) score += 2;
-    
-    // Heavily penalize image thumbnails
-    if (lower.includes('videocover') || lower.includes('/image/') || lower.includes('.jpg') || lower.includes('.png') || lower.includes('.webp') || lower.includes('/t15.')) {
-        score -= 500;
+
+    // DASH Master Video Stream with bitrate evaluation
+    if (meta && meta.isVideo) {
+        score += 100 + Math.min((meta.bitrate || 0) / 20000, 70);
     }
 
-    score += Math.min(url.length / 100, 5);
+    // Explicit resolution markers
+    if (lower.includes('1080')) score += 60;
+    else if (lower.includes('720')) score += 40;
+    else if (lower.includes('480')) score += 10;
+    else if (lower.includes('360')) score += 2;
+
+    // Standard definition progressive stream
+    if (lower.includes('playable_url') && !lower.includes('quality_hd')) score += 15;
+    if (lower.includes('browser_native_sd_url')) score += 10;
+    if (lower.includes('.mp4') || lower.includes('.m4v')) score += 10;
+    
+    // Low-bitrate preview stream (/v/t42.) - Meta's 360p/480p preview cluster:
+    if (lower.includes('/v/t42.')) score -= 120;
+    
+    // DASH manifests & segmented playlists (cannot be played directly in browser as single MP4 file)
+    if (lower.includes('.m3u8') || lower.includes('.mpd') || lower.includes('/playlist/') || lower.includes('/manifest/') || lower.includes('stream_type=dash')) {
+        score -= 500;
+    }
+    
+    // Image thumbnails & covers
+    if (lower.includes('videocover') || lower.includes('/image/') || lower.includes('.jpg') || lower.includes('.png') || lower.includes('.webp') || lower.includes('/t15.')) {
+        score -= 1000;
+    }
+
+    score += Math.min((url || '').length / 100, 5);
     return score;
 }
 
@@ -190,7 +290,7 @@ function injectDownloadButtons() {
         window.magicOverlayManager.updateAllPositions();
     }
 
-    const mediaElements = document.querySelectorAll('video, img, svg image, image');
+    const mediaElements = document.querySelectorAll('video, img, svg image, image, div[role="img"]');
 
     mediaElements.forEach(media => {
         if (platform.isThumbnail(media)) return;
@@ -198,8 +298,27 @@ function injectDownloadButtons() {
         // If a modal is open, strictly ignore any media not inside the modal
         if (hasModal && !platform.isInsideModal(media)) return;
 
+        const isVideo = media.tagName.toLowerCase() === 'video';
+
+        // Photo tile deduplication: if this media is an image inside a photo tile that already has an overlay, skip!
+        if (!isVideo) {
+            const tile = media.closest ? media.closest('a[href*="/photo"], a[href*="/photos/"], a[href*="photo.php"], div[data-visualcompletion*="media"], div.x10l6tqk, div[role="button"][tabindex]') : null;
+            if (tile) {
+                if (tile.__toystallerBoundMedia && tile.__toystallerBoundMedia.isConnected && tile.__toystallerBoundMedia !== media) {
+                    return;
+                }
+                tile.__toystallerBoundMedia = media;
+            }
+
+            const cls = (media.className && typeof media.className === 'string') ? media.className.toLowerCase() : '';
+            if (cls.includes('blur') || (media.getAttribute('aria-hidden') === 'true')) {
+                if (media.parentElement && media.parentElement.querySelector('img:not([aria-hidden="true"])')) {
+                    return;
+                }
+            }
+        }
+
         if (window.magicOverlayManager && !window.magicOverlayManager.overlays.has(media)) {
-            const isVideo = media.tagName.toLowerCase() === 'video';
             const magicId = Math.random().toString(36).substring(2, 15);
             if (isVideo) {
                 media.dataset.magicId = magicId;
@@ -237,6 +356,12 @@ function injectDownloadButtons() {
                         finalUrl = media.getAttribute('xlink:href') || 
                                    media.getAttribute('href') || 
                                    (media.href && media.href.baseVal ? media.href.baseVal : null);
+                    }
+                    if (!finalUrl && (media.tagName.toLowerCase() === 'div' || media.getAttribute('role') === 'img')) {
+                        const bg = window.getComputedStyle(media).backgroundImage;
+                        if (bg && bg.startsWith('url(')) {
+                            finalUrl = bg.replace(/^url\(["']?/, '').replace(/["']?\)$/, '');
+                        }
                     }
                     
                     if (media.srcset) {
@@ -309,20 +434,37 @@ function injectDownloadButtons() {
                             safeSendMessage({ action: 'openInNewTab', url: getHighResImageUrl() });
                         }, 250);
                     } else {
-                        const openVideo = (url) => {
+                        const openVideo = (url, audioUrl) => {
                             const clean = cleanVideoUrl(url);
+                            const cleanAudio = cleanVideoUrl(audioUrl);
                             if (clean && isValidVideoUrl(clean)) {
-                                safeSendMessage({ action: 'openInNewTab', url: clean, isVideo: true });
+                                safeSendMessage({ action: 'openInNewTab', url: clean, audioUrl: cleanAudio, isVideo: true });
                             } else {
                                 alert('Could not find the HD video URL yet.\n\nTip: Make sure the video has started playing, then click the button again.');
                             }
                         };
 
+                        const currentId = platform.extractVideoId ? platform.extractVideoId(media) : null;
+
+                        // Check if cached video resolution matches the currently active video/reel
                         if (openBtn.__resolvedVideoUrl && isValidVideoUrl(openBtn.__resolvedVideoUrl)) {
-                            openVideo(openBtn.__resolvedVideoUrl);
-                        } else {
-                            getMediaUrl(openVideo);
+                            if (openBtn.__resolvedVideoId && currentId && openBtn.__resolvedVideoId !== currentId) {
+                                // User scrolled to a new reel or video! Clear stale cache
+                                delete openBtn.__resolvedVideoUrl;
+                                delete openBtn.__resolvedAudioUrl;
+                                delete openBtn.__resolvedVideoId;
+                            } else {
+                                openVideo(openBtn.__resolvedVideoUrl, openBtn.__resolvedAudioUrl);
+                                return;
+                            }
                         }
+
+                        // Fresh resolution for this specific video
+                        openBtn.style.opacity = '0.35';
+                        getMediaUrl((url, audioUrl) => {
+                            openBtn.style.opacity = '1';
+                            openVideo(url, audioUrl);
+                        }, false, currentId);
                     }
                 });
                 buttons.push(openBtn);
@@ -401,98 +543,121 @@ function injectDownloadButtons() {
             // Pre-resolve video URL to conditionally show/hide the blue button
             const preResolveVideoUrl = (openBtn) => {
                 if (!isVideo) return;
-                getMediaUrl((url) => {
+                const currentId = platform.extractVideoId ? platform.extractVideoId(media) : null;
+                getMediaUrl((url, audioUrl) => {
                     const clean = cleanVideoUrl(url);
                     if (clean && isValidVideoUrl(clean)) {
                         openBtn.__resolvedVideoUrl = clean;
+                        openBtn.__resolvedAudioUrl = cleanVideoUrl(audioUrl);
+                        openBtn.__resolvedVideoId = currentId;
                         openBtn.style.display = 'flex';
                     }
-                }, true);
+                }, true, currentId);
             };
 
-            const getMediaUrl = (callback, silent = false) => {
+            const getMediaUrl = (callback, silent = false, videoId = null) => {
                 if (isVideo) {
                     let resolved = false;
+                    const currentId = videoId || (platform.extractVideoId ? platform.extractVideoId(media) : null);
                     const handler = (e) => {
                         if (!e.data || e.data.type !== 'magic_response_react_url_' + magicId) return;
                         if (resolved) return;
                         resolved = true;
                         window.removeEventListener('message', handler);
                         const clean = cleanVideoUrl(e.data.url);
+                        const cleanAudio = cleanVideoUrl(e.data.audioUrl);
                         if (clean && isValidVideoUrl(clean)) {
-                            callback(clean);
+                            callback(clean, cleanAudio);
                         } else {
-                            getMediaUrlFallback(callback, silent);
+                            getMediaUrlFallback(callback, silent, currentId);
                         }
                     };
                     window.addEventListener('message', handler);
-                    window.postMessage({ type: 'magic_get_react_url', id: magicId, isVideo: isVideo }, '*');
+                    window.postMessage({ type: 'magic_get_react_url', id: magicId, isVideo: isVideo, videoId: currentId }, '*');
 
                     setTimeout(() => {
                         if (resolved) return;
                         resolved = true;
                         window.removeEventListener('message', handler);
-                        getMediaUrlFallback(callback, silent);
-                    }, 400);
+                        getMediaUrlFallback(callback, silent, currentId);
+                    }, 500);
                     return;
                 }
 
-                getMediaUrlFallback(callback, silent);
+                getMediaUrlFallback(callback, silent, null);
             };
 
-            const getMediaUrlFallback = (callback, silent = false) => {
-                // 1. Check in-memory intercepted video URLs from fetch/XHR
-                if (isVideo && pageInterceptedVideoUrls.size > 0) {
-                    const platform = PlatformManager.getPlatform();
-                    const cleaned = Array.from(pageInterceptedVideoUrls).map(cleanVideoUrl).filter(Boolean);
-                    const candidates = cleaned.filter(isValidVideoUrl);
-                    const filtered = platform.filterBackgroundUrls ? platform.filterBackgroundUrls(candidates, true) : candidates;
+            const getMediaUrlFallback = (callback, silent = false, videoId = null) => {
+                const candidates = [];
 
-                    if (filtered.length > 0) {
-                        const best = pickBestVideoUrl(filtered);
-                        if (best && isValidVideoUrl(best)) {
-                            callback(best);
-                            return;
+                // 1. Direct scan of document <script> tags matching videoId
+                if (isVideo) {
+                    const scripts = document.querySelectorAll('script[type="application/json"], script:not([src])');
+                    const cdnRegex = /"(https:(?:\\\/\\\/|\/\/)[^"]+?(?:fbcdn\.net|fbsbx\.com)[^"]+?\.(?:mp4|m4v)[^"]*)"/g;
+                    
+                    if (videoId) {
+                        for (const s of scripts) {
+                            const text = s.textContent;
+                            if (text && text.includes(videoId)) {
+                                let m;
+                                while ((m = cdnRegex.exec(text)) !== null) {
+                                    try {
+                                        const u = cleanVideoUrl(JSON.parse('"' + m[1] + '"'));
+                                        if (u && isValidVideoUrl(u)) candidates.push(u);
+                                    } catch(e) {
+                                        const u = cleanVideoUrl(m[1]);
+                                        if (u && isValidVideoUrl(u)) candidates.push(u);
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // If no candidate was found for videoId, scan scripts with playable video keys
+                    if (candidates.length === 0) {
+                        for (const s of scripts) {
+                            const text = s.textContent;
+                            if (text && (text.includes('playable_url_quality_hd') || text.includes('browser_native_hd_url') || text.includes('playable_url'))) {
+                                let m;
+                                while ((m = cdnRegex.exec(text)) !== null) {
+                                    try {
+                                        const u = cleanVideoUrl(JSON.parse('"' + m[1] + '"'));
+                                        if (u && isValidVideoUrl(u)) candidates.push(u);
+                                    } catch(e) {
+                                        const u = cleanVideoUrl(m[1]);
+                                        if (u && isValidVideoUrl(u)) candidates.push(u);
+                                    }
+                                }
+                            }
                         }
                     }
                 }
 
-                // 2. Direct scan of document <script> tags from content script context
-                if (isVideo) {
-                    const scripts = document.querySelectorAll('script[type="application/json"], script:not([src])');
-                    const scriptCandidates = [];
-                    const cdnRegex = /"(https:(?:\\\/\\\/|\/\/)[^"]+?(?:fbcdn\.net|fbsbx\.com)[^"]+?\.(?:mp4|m4v)[^"]*)"/g;
-                    for (const s of scripts) {
-                        const text = s.textContent;
-                        if (!text || (!text.includes('fbcdn.net') && !text.includes('fbsbx.com') && !text.includes('playable_url'))) continue;
-                        let m;
-                        while ((m = cdnRegex.exec(text)) !== null) {
-                            try {
-                                const u = cleanVideoUrl(JSON.parse('"' + m[1] + '"'));
-                                if (u && isValidVideoUrl(u)) scriptCandidates.push(u);
-                            } catch(e) {
-                                const unescaped = cleanVideoUrl(m[1]);
-                                if (unescaped && isValidVideoUrl(unescaped)) scriptCandidates.push(unescaped);
-                            }
+                // 2. Check in-memory intercepted video URLs from fetch/XHR
+                if (isVideo && pageInterceptedVideoUrls.size > 0) {
+                    for (const u of pageInterceptedVideoUrls) {
+                        const clean = cleanVideoUrl(u);
+                        if (clean && isValidVideoUrl(clean)) {
+                            candidates.push(clean);
                         }
                     }
-                    if (scriptCandidates.length > 0) {
-                        const best = pickBestVideoUrl(scriptCandidates);
-                        if (best && isValidVideoUrl(best)) {
-                            callback(best);
-                            return;
-                        }
+                }
+
+                if (candidates.length > 0) {
+                    const best = pickBestVideoUrl(candidates);
+                    if (best && isValidVideoUrl(best)) {
+                        callback(best);
+                        return;
                     }
                 }
 
                 // 3. Fallback to background script webRequest
-                const mediaType = isVideo ? 'video' : 'img';
-                safeSendMessage({ action: 'getMediaUrls', mediaType: mediaType }, (response) => {
+                safeSendMessage({ action: 'getMediaUrls', mediaType: isVideo ? 'video' : 'img' }, (response) => {
                     if (response && response.urls && response.urls.length > 0) {
                         const cleaned = response.urls.map(cleanVideoUrl).filter(Boolean);
-                        const candidates = cleaned.filter(isValidVideoUrl);
-                        if (candidates.length > 0) {
-                            const best = pickBestVideoUrl(candidates);
+                        const bgCandidates = cleaned.filter(isValidVideoUrl);
+                        if (bgCandidates.length > 0) {
+                            const best = pickBestVideoUrl(bgCandidates);
                             if (best && isValidVideoUrl(best)) {
                                 callback(best);
                                 return;

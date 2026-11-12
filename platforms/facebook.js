@@ -38,6 +38,9 @@ window.ToystallerPlatforms = window.ToystallerPlatforms || {};
             if (lower.includes('unified_cvc')) return false;
             if (lower.includes('.m3u8') || lower.includes('.mpd') || lower.includes('stream_type=dash')) return false;
             
+            // Reject audio-only streams
+            if (lower.includes('dash_audio') || lower.includes('_audio_')) return false;
+
             // Reject image extensions & covers
             if (lower.includes('.jpg') || lower.includes('.jpeg') || lower.includes('.png') || lower.includes('.webp') || lower.includes('videocover') || lower.includes('/t15.')) {
                 return false;
@@ -267,17 +270,42 @@ window.ToystallerPlatforms = window.ToystallerPlatforms || {};
                 if (friendCard) return friendCard;
             }
 
-            // Direct photo links in feed or albums
-            const photoLink = media.closest('a[href*="/photo/"], a[href*="/photo?"], a[href*="photo.php"]');
-            if (photoLink) return photoLink;
+            // Direct photo links / tiles in feed, albums, collages, or groups
+            const photoTile = media.closest(
+                'a[href*="/photo"], a[href*="/photos/"], a[href*="photo.php"], ' +
+                'div[data-visualcompletion*="media"], div[data-visualcompletion="ignore-dynamic-extra-coverage"], ' +
+                'div[role="button"][tabindex], div.x10l6tqk'
+            );
+            const article = media.closest('div[role="article"]');
+            if (photoTile) {
+                const tileRect = photoTile.getBoundingClientRect();
+                if (tileRect.width >= 40 && tileRect.height >= 40) {
+                    if (!article || tileRect.width <= article.getBoundingClientRect().width * 0.98) {
+                        return photoTile;
+                    }
+                }
+            }
 
             // Video player container with video ID
             const videoContainer = media.closest('div[data-video-id], div.x1y1aw1k');
             if (videoContainer) return videoContainer;
 
-            // Post article container
-            const article = media.closest('div[role="article"]');
-            if (article) return article;
+            // In multi-image posts or collages, return the individual photo wrapper, NEVER the entire article
+            if (article) {
+                const totalImages = article.querySelectorAll('img, image, div[role="img"]').length;
+                if (totalImages > 1) {
+                    let parent = media.parentElement;
+                    for (let i = 0; i < 5 && parent && parent !== article; i++) {
+                        const pRect = parent.getBoundingClientRect();
+                        if (pRect.width >= 40 && pRect.height >= 40 && pRect.width <= article.getBoundingClientRect().width * 0.95) {
+                            return parent;
+                        }
+                        parent = parent.parentElement;
+                    }
+                    return media;
+                }
+                return article;
+            }
 
             const feedUnit = media.closest('div[data-pagelet*="FeedUnit"]');
             if (feedUnit) return feedUnit;
@@ -391,9 +419,9 @@ window.ToystallerPlatforms = window.ToystallerPlatforms || {};
                         if (rect.width >= 45 && rect.height >= 60) return false;
                     }
 
-                    // Any post photo on feed
-                    if (rect.width >= 65 && rect.height >= 65) return false;
-                    if (naturalW >= 65 && naturalH >= 65) return false;
+                    // Any post photo or collage tile on feed/groups
+                    if (rect.width >= 50 && rect.height >= 50) return false;
+                    if (naturalW >= 50 && naturalH >= 50) return false;
                     return true;
                 }
 
