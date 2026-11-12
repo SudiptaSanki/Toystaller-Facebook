@@ -285,24 +285,58 @@
         }
     }
 
+    // --- Real-time Network Interception of Live Stream Chunks ---
+    function processInterceptedMediaUrl(rawUrl) {
+        if (!rawUrl || typeof rawUrl !== 'string') return;
+        if (!rawUrl.includes('fbcdn.net') && !rawUrl.includes('fbsbx.com')) return;
+        
+        const clean = cleanVideoUrl(rawUrl);
+        if (!clean) return;
+
+        const meta = parseStreamMetadata(clean);
+        if (meta && meta.videoId) {
+            console.log(`[Toystaller] Intercepted stream for Reel/Video [${meta.videoId}]:`, {
+                isAudio: meta.isAudio,
+                isVideo: meta.isVideo,
+                tag: meta.vencodeTag,
+                bitrate: meta.bitrate,
+                url: clean.substring(0, 80) + '...'
+            });
+            recordVideoEntry(meta.videoId, null, null, clean);
+            window.postMessage({
+                type: 'toystaller_stream_detected',
+                videoId: meta.videoId,
+                meta: meta,
+                url: clean
+            }, '*');
+        } else if (isValidVideo(clean)) {
+            recordVideoEntry(null, null, null, clean);
+        }
+    }
+
     // --- Network Interception: Fetch ---
     const originalFetch = window.fetch;
     window.fetch = async function (...args) {
-        const response = await originalFetch.apply(this, args);
         try {
-            const url = typeof args[0] === 'string' ? args[0] : (args[0] && args[0].url) || '';
+            const rawUrl = typeof args[0] === 'string' ? args[0] : (args[0] && args[0].url) || '';
+            processInterceptedMediaUrl(rawUrl);
+        } catch (e) {}
+
+        const response = await originalFetch.apply(this, args);
+
+        try {
+            const rawUrl = typeof args[0] === 'string' ? args[0] : (args[0] && args[0].url) || '';
+            // Only inspect JSON/text API endpoints for master progressive streams or manifests
             if (
-                url.includes('facebook.com') ||
-                url.includes('fbcdn.net') ||
-                url.includes('graph.') ||
-                url.includes('/api/graphql') ||
-                url.includes('/ajax/') ||
-                url.includes('graphql')
+                rawUrl.includes('/api/graphql') ||
+                rawUrl.includes('/ajax/') ||
+                rawUrl.includes('graphql')
             ) {
                 const clone = response.clone();
                 clone.text().then(extractUrlsFromText).catch(() => {});
             }
         } catch (e) {}
+
         return response;
     };
 
@@ -314,13 +348,14 @@
         let reqUrl = '';
         xhr.open = function (method, url, ...rest) {
             reqUrl = url || '';
+            try {
+                processInterceptedMediaUrl(reqUrl);
+            } catch (e) {}
             return originalOpen(method, url, ...rest);
         };
         xhr.addEventListener('load', function () {
             try {
                 if (
-                    reqUrl.includes('facebook.com') ||
-                    reqUrl.includes('fbcdn.net') ||
                     reqUrl.includes('/api/graphql') ||
                     reqUrl.includes('/ajax/') ||
                     reqUrl.includes('graphql')
@@ -543,26 +578,65 @@
         return null;
     }
 
+    function extractVideoIdFromFiber(el) {
+        if (!el) return null;
+        const fiberKey = Object.keys(el).find(k =>
+            k.startsWith('__reactFiber$') ||
+            k.startsWith('__reactInternalInstance$')
+        );
+        let fiber = fiberKey ? el[fiberKey] : null;
+        let depth = 0;
+        while (fiber && depth < 50) {
+            if (fiber.memoizedProps) {
+                const p = inspectFiberProps(fiber.memoizedProps);
+                if (p.id) return p.id;
+            }
+            if (fiber.memoizedState) {
+                const s = inspectFiberProps(fiber.memoizedState);
+                if (s.id) return s.id;
+            }
+            if (fiber.pendingProps) {
+                const pp = inspectFiberProps(fiber.pendingProps);
+                if (pp.id) return pp.id;
+            }
+            fiber = fiber.return;
+            depth++;
+        }
+        return null;
+    }
+
     // --- Content Script Bridge via postMessage ---
     window.addEventListener('message', (e) => {
         if (!e.data || e.data.type !== 'magic_get_react_url' || !e.data.id) return;
         const reqId = e.data.id;
         const isVideo = e.data.isVideo !== undefined ? e.data.isVideo : true;
-        const requestedVideoId = e.data.videoId ? String(e.data.videoId).trim() : null;
-        let el = document.querySelector(`[data-magic-id="${reqId}"]`);
-        if (!el && isVideo) {
-            // Fallback: look for playing or visible video in viewport
-            const videos = Array.from(document.querySelectorAll('video'));
-            el = videos.find(v => !v.paused || v.currentTime > 0) || videos[0];
+        let requestedVideoId = e.data.videoId ? String(e.data.videoId).trim() : null;
+
+        // Locate the EXACT element marked synchronously by content script
+        let el = document.querySelector(`[data-toystaller-active="${reqId}"]`) ||
+                 document.querySelector(`[data-magic-id="${reqId}"]`);
+        if (el) {
+            el.removeAttribute('data-toystaller-active');
+        }
+
+        let detectedVideoId = requestedVideoId;
+        if (!detectedVideoId && el) {
+            detectedVideoId = extractVideoIdFromFiber(el);
+            if (!detectedVideoId) {
+                const platform = getPlatform();
+                if (platform && platform.extractVideoId) {
+                    detectedVideoId = platform.extractVideoId(el);
+                }
+            }
         }
 
         let url = null;
         let audioUrl = null;
 
         if (isVideo) {
-            // 1. If videoId was provided, check the video store first
-            if (requestedVideoId && videoStoreById.has(requestedVideoId)) {
-                const entry = videoStoreById.get(requestedVideoId);
+            // 1. If we have a video ID for this element, check video store
+            if (detectedVideoId && videoStoreById.has(detectedVideoId)) {
+                const entry = videoStoreById.get(detectedVideoId);
                 if (entry.hd) {
                     url = entry.hd;
                 } else if (entry.dashVideo) {
@@ -573,7 +647,7 @@
                 }
             }
 
-            // 2. Check current Reel ID from URL if on /reel/
+            // 2. Check current dedicated Reel page URL if on /reel/<id>
             if (!url && window.location.pathname.includes('/reel/')) {
                 const m = window.location.pathname.match(/\/reel\/(\d+)/);
                 if (m && m[1] && videoStoreById.has(m[1])) {
@@ -586,15 +660,16 @@
                     } else if (entry.sd) {
                         url = entry.sd;
                     }
+                    if (!detectedVideoId) detectedVideoId = m[1];
                 }
             }
 
-            // 3. Walk the React Fiber component hierarchy
+            // 3. Walk the React Fiber hierarchy of the exact clicked element
             if (!url && el) {
                 url = extractVideoUrlFromFiberTree(el);
             }
 
-            // 4. Platform DOM / Script lookup matched to Video ID
+            // 4. Platform DOM lookup strictly matching this element's video ID
             if (!url && el) {
                 const platform = getPlatform();
                 if (platform.extractVideoUrlFromDOM) {
@@ -602,15 +677,26 @@
                 }
             }
 
-            // If we have a video URL, resolve companion audio track if present
+            // 5. If we found a video URL, resolve companion audio track
             if (url && !audioUrl) {
                 const meta = parseStreamMetadata(url);
-                const vid = (meta && meta.videoId) || requestedVideoId;
+                const vid = (meta && meta.videoId) || detectedVideoId;
                 if (vid && videoStoreById.has(vid)) {
                     const entry = videoStoreById.get(vid);
                     if (entry.dashAudio) {
                         audioUrl = entry.dashAudio;
                     }
+                }
+            }
+
+            // Strict verification: Never return an audio track as the main video URL!
+            if (url) {
+                const meta = parseStreamMetadata(url);
+                if (meta && meta.isAudio) {
+                    audioUrl = url;
+                    url = null;
+                } else if (!isValidVideo(url)) {
+                    url = null;
                 }
             }
         } else {
@@ -619,21 +705,18 @@
             }
         }
 
-        // Guarantee audio-only streams are NEVER sent back as the main video URL!
-        if (isVideo && url) {
-            const meta = parseStreamMetadata(url);
-            if (meta && meta.isAudio) {
-                audioUrl = url;
-                url = null;
-            } else if (!isValidVideo(url)) {
-                url = null;
-            }
-        }
+        console.log(`[Toystaller] Responding to media request [${reqId}]:`, {
+            isVideo: isVideo,
+            targetId: detectedVideoId,
+            foundVideoUrl: url ? (url.substring(0, 80) + '...') : 'null',
+            foundAudioUrl: audioUrl ? (audioUrl.substring(0, 80) + '...') : 'null'
+        });
 
         window.postMessage({
             type: 'magic_response_react_url_' + reqId,
             url: url,
-            audioUrl: audioUrl
+            audioUrl: audioUrl,
+            videoId: detectedVideoId
         }, '*');
     });
 

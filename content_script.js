@@ -300,22 +300,45 @@ function injectDownloadButtons() {
 
         const isVideo = media.tagName.toLowerCase() === 'video';
 
-        // Photo tile deduplication: if this media is an image inside a photo tile that already has an overlay, skip!
+        // 1. If media is an image, but is inside a container that has a <video> element, SKIP IT!
+        // (A video's cover/poster image or video placeholder must NEVER get its own button)
         if (!isVideo) {
-            const tile = media.closest ? media.closest('a[href*="/photo"], a[href*="/photos/"], a[href*="photo.php"], div[data-visualcompletion*="media"], div.x10l6tqk, div[role="button"][tabindex]') : null;
+            const videoParent = media.closest(
+                'div[data-pagelet*="Reel"], div[data-pagelet*="Video"], ' +
+                'div[data-video-id], div[role="article"], div[role="main"], ' +
+                'div.x1y1aw1k, div.x10l6tqk'
+            );
+            if (videoParent && videoParent.querySelector('video')) {
+                return; // Video element takes priority! Skip video cover/thumbnail image.
+            }
+        }
+
+        // 2. Photo tile deduplication: only 1 media element per tile container
+        if (!isVideo) {
+            const tile = media.closest ? media.closest(
+                'a[href*="/photo"], a[href*="/photos/"], a[href*="photo.php"], ' +
+                'div[data-visualcompletion*="media"], div[data-visualcompletion="ignore-dynamic-extra-coverage"], ' +
+                'div.x10l6tqk, div[role="button"][tabindex]'
+            ) : null;
             if (tile) {
                 if (tile.__toystallerBoundMedia && tile.__toystallerBoundMedia.isConnected && tile.__toystallerBoundMedia !== media) {
-                    return;
+                    return; // Tile already has an active media element
                 }
                 tile.__toystallerBoundMedia = media;
             }
 
+            // Exclude blur placeholders if a non-blurred sibling exists
             const cls = (media.className && typeof media.className === 'string') ? media.className.toLowerCase() : '';
             if (cls.includes('blur') || (media.getAttribute('aria-hidden') === 'true')) {
                 if (media.parentElement && media.parentElement.querySelector('img:not([aria-hidden="true"])')) {
                     return;
                 }
             }
+        }
+
+        // 3. Skip if overlay already exists for this media element
+        if (window.magicOverlayManager && window.magicOverlayManager.hasOverlay(media)) {
+            return;
         }
 
         if (window.magicOverlayManager && !window.magicOverlayManager.overlays.has(media)) {
@@ -340,12 +363,12 @@ function injectDownloadButtons() {
                     align-items: center;
                     justify-content: center;
                     pointer-events: auto;
-                    opacity: 0.55;
+                    opacity: 0.85;
                     transition: opacity 0.15s ease, background-color 0.15s ease, transform 0.1s ease;
                     box-shadow: 0 2px 6px rgba(0,0,0,0.45);
                     transform: scale(${scale});
                     transform-origin: center;
-                    margin: 0 4px;
+                    margin: 0;
                 `;
 
                 const iconSize = Math.round(16 * scale);
@@ -387,43 +410,38 @@ function injectDownloadButtons() {
                     return finalUrl;
                 };
 
-                // Blue Button: Open Video/Image in new tab
+                // EXACTLY ONE Extension Button per Media Item
                 const openBtn = document.createElement('button');
                 openBtn.className = 'magic-open-btn';
-                openBtn.title = isVideo ? 'Open HD video in new tab' : 'Open photo in new tab';
+                openBtn.title = isVideo ? 'Open HD Video / Reel in new tab' : 'Open photo in new tab';
                 openBtn.innerHTML = `<svg width="${iconSize}" height="${iconSize}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path><polyline points="15 3 21 3 21 9"></polyline><line x1="10" y1="14" x2="21" y2="3"></line></svg>`;
-                openBtn.style.cssText = makeBtnStyle('rgba(30,30,30,0.75)');
-
-                // For video elements, pre-resolve in background
-                if (isVideo) {
-                    openBtn.title = 'Open HD video in new tab';
-                }
+                openBtn.style.cssText = makeBtnStyle('rgba(24, 119, 242, 0.90)');
 
                 openBtn.addEventListener('mouseenter', () => {
                     openBtn.style.opacity = '1';
-                    openBtn.style.backgroundColor = 'rgba(52, 152, 219, 0.95)';
+                    openBtn.style.backgroundColor = 'rgba(24, 119, 242, 1)';
+                    openBtn.style.transform = `scale(${scale * 1.08})`;
                 });
                 openBtn.addEventListener('mouseleave', () => {
-                    openBtn.style.opacity = '0.55';
-                    openBtn.style.backgroundColor = 'rgba(30,30,30,0.75)';
+                    openBtn.style.opacity = '0.85';
+                    openBtn.style.backgroundColor = 'rgba(24, 119, 242, 0.90)';
+                    openBtn.style.transform = `scale(${scale})`;
                 });
+
                 openBtn.addEventListener('click', (e) => {
                     e.preventDefault();
                     e.stopPropagation();
+
                     if (!isVideo) {
                         const imgMagicId = Math.random().toString(36).substring(2, 15);
-                        media.setAttribute('data-magic-id', imgMagicId);
+                        media.setAttribute('data-toystaller-active', imgMagicId);
                         let resolved = false;
                         const handler = (ev) => {
                             if (!ev.data || ev.data.type !== 'magic_response_react_url_' + imgMagicId) return;
                             if (resolved) return;
                             resolved = true;
                             window.removeEventListener('message', handler);
-                            if (ev.data.url) {
-                                safeSendMessage({ action: 'openInNewTab', url: ev.data.url });
-                            } else {
-                                safeSendMessage({ action: 'openInNewTab', url: getHighResImageUrl() });
-                            }
+                            safeSendMessage({ action: 'openInNewTab', url: ev.data.url || getHighResImageUrl() });
                         };
                         window.addEventListener('message', handler);
                         window.postMessage({ type: 'magic_get_react_url', id: imgMagicId, isVideo: false }, '*');
@@ -433,110 +451,83 @@ function injectDownloadButtons() {
                             window.removeEventListener('message', handler);
                             safeSendMessage({ action: 'openInNewTab', url: getHighResImageUrl() });
                         }, 250);
-                    } else {
-                        const openVideo = (url, audioUrl) => {
-                            const clean = cleanVideoUrl(url);
-                            const cleanAudio = cleanVideoUrl(audioUrl);
-                            if (clean && isValidVideoUrl(clean)) {
-                                safeSendMessage({ action: 'openInNewTab', url: clean, audioUrl: cleanAudio, isVideo: true });
-                            } else {
-                                alert('Could not find the HD video URL yet.\n\nTip: Make sure the video has started playing, then click the button again.');
-                            }
-                        };
-
-                        const currentId = platform.extractVideoId ? platform.extractVideoId(media) : null;
-
-                        // Check if cached video resolution matches the currently active video/reel
-                        if (openBtn.__resolvedVideoUrl && isValidVideoUrl(openBtn.__resolvedVideoUrl)) {
-                            if (openBtn.__resolvedVideoId && currentId && openBtn.__resolvedVideoId !== currentId) {
-                                // User scrolled to a new reel or video! Clear stale cache
-                                delete openBtn.__resolvedVideoUrl;
-                                delete openBtn.__resolvedAudioUrl;
-                                delete openBtn.__resolvedVideoId;
-                            } else {
-                                openVideo(openBtn.__resolvedVideoUrl, openBtn.__resolvedAudioUrl);
-                                return;
-                            }
-                        }
-
-                        // Fresh resolution for this specific video
-                        openBtn.style.opacity = '0.35';
-                        getMediaUrl((url, audioUrl) => {
-                            openBtn.style.opacity = '1';
-                            openVideo(url, audioUrl);
-                        }, false, currentId);
+                        return;
                     }
-                });
-                buttons.push(openBtn);
 
-                // Red Button: Open Thumbnail/Poster in new tab
-                const imgBtn = document.createElement('button');
-                imgBtn.className = 'magic-img-btn';
-                imgBtn.title = isVideo ? 'Open thumbnail in new tab' : 'Open image in new tab';
-                imgBtn.innerHTML = `<svg width="${iconSize}" height="${iconSize}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path><polyline points="15 3 21 3 21 9"></polyline><line x1="10" y1="14" x2="21" y2="3"></line></svg>`;
-                imgBtn.style.cssText = makeBtnStyle('rgba(30,30,30,0.75)');
-                imgBtn.addEventListener('mouseenter', () => {
-                    imgBtn.style.opacity = '1';
-                    imgBtn.style.backgroundColor = 'rgba(231, 76, 60, 0.95)';
-                });
-                imgBtn.addEventListener('mouseleave', () => {
-                    imgBtn.style.opacity = '0.55';
-                    imgBtn.style.backgroundColor = 'rgba(30,30,30,0.75)';
-                });
-                imgBtn.addEventListener('click', (e) => {
-                    e.preventDefault();
-                    e.stopPropagation();
-                    if (isVideo) {
-                        let poster = media.getAttribute('poster');
-                        
-                        // Fallback 1: Look for nearby image tag
-                        if (!poster) {
-                            let current = media;
-                            for (let i = 0; i < 4 && current && !poster; i++) {
-                                const img = current.querySelector ? current.querySelector('img') : null;
-                                if (img && img.src && !img.src.startsWith('data:')) {
-                                    poster = img.src;
+                    // --- Video / Reel Extraction ---
+                    const openVideo = (url, audioUrl) => {
+                        const clean = cleanVideoUrl(url);
+                        const cleanAudio = cleanVideoUrl(audioUrl);
+                        if (clean && isValidVideoUrl(clean)) {
+                            safeSendMessage({ action: 'openInNewTab', url: clean, audioUrl: cleanAudio, isVideo: true });
+                        } else {
+                            alert('Could not find the HD video URL yet.\n\nTip: Make sure the video has started playing, then click the button again.');
+                        }
+                    };
+
+                    const currentId = platform.extractVideoId ? platform.extractVideoId(media) : null;
+                    console.log(`[Toystaller] Clicked Video/Reel element. Extracted target ID: [${currentId}]`);
+
+                    // Check if cached video resolution matches the currently active video/reel
+                    if (openBtn.__resolvedVideoUrl && isValidVideoUrl(openBtn.__resolvedVideoUrl)) {
+                        if (!currentId || !openBtn.__resolvedVideoId || openBtn.__resolvedVideoId === currentId) {
+                            console.log(`[Toystaller] Opening from validated cache for Reel [${currentId}]:`, openBtn.__resolvedVideoUrl);
+                            openVideo(openBtn.__resolvedVideoUrl, openBtn.__resolvedAudioUrl);
+                            return;
+                        } else {
+                            delete openBtn.__resolvedVideoUrl;
+                            delete openBtn.__resolvedAudioUrl;
+                            delete openBtn.__resolvedVideoId;
+                        }
+                    }
+
+                    // Loading indicator on button
+                    openBtn.style.opacity = '0.35';
+                    openBtn.style.pointerEvents = 'none';
+
+                    // Safe extraction with retry loop
+                    let attempts = 0;
+                    const maxAttempts = 6;
+
+                    const tryExtract = () => {
+                        attempts++;
+                        getMediaUrl((url, audioUrl, returnedVideoId) => {
+                            // If a specific Reel ID is expected, reject mismatching streams
+                            if (currentId && returnedVideoId && returnedVideoId !== currentId) {
+                                console.warn(`[Toystaller] Returned ID (${returnedVideoId}) does not match active Reel (${currentId}), retrying...`);
+                                url = null;
+                            }
+
+                            if (url && isValidVideoUrl(url)) {
+                                openBtn.style.opacity = '1';
+                                openBtn.style.pointerEvents = 'auto';
+                                openBtn.__resolvedVideoUrl = url;
+                                openBtn.__resolvedAudioUrl = audioUrl;
+                                openBtn.__resolvedVideoId = currentId || returnedVideoId;
+                                console.log(`[Toystaller] Successfully resolved Reel [${currentId || returnedVideoId}]:`, {
+                                    video: url,
+                                    audio: audioUrl
+                                });
+                                openVideo(url, audioUrl);
+                            } else if (attempts < maxAttempts) {
+                                console.log(`[Toystaller] Stream buffering (attempt ${attempts}/${maxAttempts}), retrying in 350ms...`);
+                                if (media.paused && media.currentTime === 0) {
+                                    try { media.play().catch(() => {}); } catch(e) {}
                                 }
-                                current = current.parentElement;
+                                setTimeout(tryExtract, 350);
+                            } else {
+                                openBtn.style.opacity = '1';
+                                openBtn.style.pointerEvents = 'auto';
+                                console.warn(`[Toystaller] Stream timed out for Reel [${currentId}].`);
+                                alert('Toystaller: Facebook has not loaded the media stream for this Reel yet.\n\nTip: Please let the Reel play for a second so it buffers, then click the button again.');
                             }
-                        }
+                        }, true, currentId);
+                    };
 
-                        // Fallback 2: React Fiber extraction for poster
-                        const thumbMagicId = Math.random().toString(36).substring(2, 15);
-                        media.setAttribute('data-magic-id', thumbMagicId);
-                        let resolved = false;
-                        const handler = (ev) => {
-                            if (!ev.data || ev.data.type !== 'magic_response_react_url_' + thumbMagicId) return;
-                            if (resolved) return;
-                            resolved = true;
-                            window.removeEventListener('message', handler);
-                            if (ev.data.url) {
-                                safeSendMessage({ action: 'openInNewTab', url: ev.data.url });
-                            } else if (poster) {
-                                safeSendMessage({ action: 'openInNewTab', url: poster });
-                            } else {
-                                alert('No thumbnail image available for this video.');
-                            }
-                        };
-                        window.addEventListener('message', handler);
-                        window.postMessage({ type: 'magic_get_react_url', id: thumbMagicId, isVideo: false }, '*');
-                        
-                        setTimeout(() => {
-                            if (resolved) return;
-                            resolved = true;
-                            window.removeEventListener('message', handler);
-                            if (poster) {
-                                safeSendMessage({ action: 'openInNewTab', url: poster });
-                            } else {
-                                alert('No thumbnail image available for this video.');
-                            }
-                        }, 350);
-                    } else {
-                        safeSendMessage({ action: 'openInNewTab', url: getHighResImageUrl() });
-                    }
+                    tryExtract();
                 });
-                buttons.push(imgBtn);
 
+                buttons.push(openBtn);
                 return buttons;
             };
 
@@ -567,12 +558,14 @@ function injectDownloadButtons() {
                         const clean = cleanVideoUrl(e.data.url);
                         const cleanAudio = cleanVideoUrl(e.data.audioUrl);
                         if (clean && isValidVideoUrl(clean)) {
-                            callback(clean, cleanAudio);
+                            callback(clean, cleanAudio, e.data.videoId);
                         } else {
                             getMediaUrlFallback(callback, silent, currentId);
                         }
                     };
                     window.addEventListener('message', handler);
+                    // Mark element so main-world interceptor finds the exact clicked element
+                    media.setAttribute('data-toystaller-active', magicId);
                     window.postMessage({ type: 'magic_get_react_url', id: magicId, isVideo: isVideo, videoId: currentId }, '*');
 
                     setTimeout(() => {
@@ -580,7 +573,7 @@ function injectDownloadButtons() {
                         resolved = true;
                         window.removeEventListener('message', handler);
                         getMediaUrlFallback(callback, silent, currentId);
-                    }, 500);
+                    }, 400);
                     return;
                 }
 
@@ -613,8 +606,8 @@ function injectDownloadButtons() {
                         }
                     }
 
-                    // If no candidate was found for videoId, scan scripts with playable video keys
-                    if (candidates.length === 0) {
+                    // If no candidate was found for videoId and no specific videoId was requested, scan scripts
+                    if (candidates.length === 0 && !videoId) {
                         for (const s of scripts) {
                             const text = s.textContent;
                             if (text && (text.includes('playable_url_quality_hd') || text.includes('browser_native_hd_url') || text.includes('playable_url'))) {
@@ -633,12 +626,19 @@ function injectDownloadButtons() {
                     }
                 }
 
-                // 2. Check in-memory intercepted video URLs from fetch/XHR
+                // 2. Check in-memory intercepted video URLs from live fetch/XHR
                 if (isVideo && pageInterceptedVideoUrls.size > 0) {
                     for (const u of pageInterceptedVideoUrls) {
                         const clean = cleanVideoUrl(u);
                         if (clean && isValidVideoUrl(clean)) {
-                            candidates.push(clean);
+                            if (videoId) {
+                                const meta = parseStreamMetadata(clean);
+                                if (meta && meta.videoId === videoId) {
+                                    candidates.push(clean);
+                                }
+                            } else {
+                                candidates.push(clean);
+                            }
                         }
                     }
                 }
@@ -646,7 +646,7 @@ function injectDownloadButtons() {
                 if (candidates.length > 0) {
                     const best = pickBestVideoUrl(candidates);
                     if (best && isValidVideoUrl(best)) {
-                        callback(best);
+                        callback(best, null, videoId);
                         return;
                     }
                 }
@@ -655,18 +655,20 @@ function injectDownloadButtons() {
                 safeSendMessage({ action: 'getMediaUrls', mediaType: isVideo ? 'video' : 'img' }, (response) => {
                     if (response && response.urls && response.urls.length > 0) {
                         const cleaned = response.urls.map(cleanVideoUrl).filter(Boolean);
-                        const bgCandidates = cleaned.filter(isValidVideoUrl);
+                        const bgCandidates = cleaned.filter(isValidVideoUrl).filter(u => {
+                            if (!videoId) return true;
+                            const meta = parseStreamMetadata(u);
+                            return meta && meta.videoId === videoId;
+                        });
                         if (bgCandidates.length > 0) {
                             const best = pickBestVideoUrl(bgCandidates);
                             if (best && isValidVideoUrl(best)) {
-                                callback(best);
+                                callback(best, null, videoId);
                                 return;
                             }
                         }
                     }
-                    if (!silent) {
-                        alert('Could not find the HD video URL yet.\n\nTip: Make sure the video has started playing, then click the button again.');
-                    }
+                    callback(null, null, videoId);
                 });
             };
 

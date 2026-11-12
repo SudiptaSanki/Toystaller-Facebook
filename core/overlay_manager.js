@@ -387,6 +387,18 @@ class OverlayManager {
         }, 250);
     }
 
+    hasOverlay(media) {
+        if (!media) return false;
+        if (this.overlays.has(media)) return true;
+        const hoverHost = this._findHoverHost(media);
+        for (const [existingMedia, existingEntry] of this.overlays.entries()) {
+            if (existingMedia === media) return true;
+            if (hoverHost && existingEntry.hoverHost && hoverHost === existingEntry.hoverHost) return true;
+            if (existingMedia.contains(media) || (media.contains && media.contains(existingMedia))) return true;
+        }
+        return false;
+    }
+
     addOverlay(media, createButtonsFn) {
         if (this.overlays.has(media)) return;
 
