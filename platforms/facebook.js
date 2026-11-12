@@ -159,35 +159,38 @@ window.ToystallerPlatforms = window.ToystallerPlatforms || {};
                 };
             }
 
+            // Universal Top-Right Placement:
+            // Prevents collision with Facebook's native audio/mute/tagging controls on top-left,
+            // and ensures buttons are consistently anchored at the top-right across all sections.
             if (section === 'modal') {
-                return { preferredCorners: ['top-left', 'bottom-left'], padding: 14 };
+                return { preferredCorners: ['top-right', 'bottom-right'], padding: 14 };
             }
             if (section === 'watch') {
-                return { preferredCorners: ['top-left', 'bottom-left'], padding: 16 };
+                return { preferredCorners: ['top-right', 'bottom-right'], padding: 16 };
             }
             if (section === 'stories') {
-                return { preferredCorners: ['top-left', 'bottom-left'], padding: 16, topOffset: 48 };
+                return { preferredCorners: ['top-right', 'bottom-right'], padding: 16, topOffset: 48 };
             }
             if (section === 'feed') {
-                return { preferredCorners: ['top-left', 'bottom-left'], padding: 12 };
+                return { preferredCorners: ['top-right', 'bottom-right'], padding: 12 };
             }
             if (section === 'groups') {
-                return { preferredCorners: ['top-left', 'top-right', 'bottom-left'], padding: 12 };
+                return { preferredCorners: ['top-right', 'bottom-right'], padding: 12 };
             }
             if (section === 'friends') {
-                return { preferredCorners: ['top-right', 'top-left'], padding: 8 };
+                return { preferredCorners: ['top-right', 'bottom-right'], padding: 8 };
             }
             if (section === 'profile_photos' || section === 'photos') {
-                return { preferredCorners: ['top-right', 'top-left', 'bottom-right'], padding: 8 };
+                return { preferredCorners: ['top-right', 'bottom-right'], padding: 8 };
             }
             if (section === 'profile_videos') {
-                return { preferredCorners: ['top-left', 'bottom-left'], padding: 10 };
+                return { preferredCorners: ['top-right', 'bottom-right'], padding: 10 };
             }
             if (section === 'messages') {
-                return { preferredCorners: ['top-left', 'top-right'], padding: 8 };
+                return { preferredCorners: ['top-right', 'bottom-right'], padding: 8 };
             }
 
-            return { preferredCorners: ['top-left', 'bottom-left', 'top-right'], padding: 12 };
+            return { preferredCorners: ['top-right', 'bottom-right'], padding: 12 };
         },
 
         // --- Modal & Theater Mode Detection ---
@@ -274,7 +277,7 @@ window.ToystallerPlatforms = window.ToystallerPlatforms || {};
             const photoTile = media.closest(
                 'a[href*="/photo"], a[href*="/photos/"], a[href*="photo.php"], ' +
                 'div[data-visualcompletion*="media"], div[data-visualcompletion="ignore-dynamic-extra-coverage"], ' +
-                'div[role="button"][tabindex], div.x10l6tqk'
+                'div[role="button"][tabindex]'
             );
             const article = media.closest('div[role="article"]');
             if (photoTile) {

@@ -190,12 +190,12 @@ function scoreVideoUrl(url) {
     if (meta && meta.isAudio) return -10000;
     if (lower.includes('dash_audio') || lower.includes('_audio_')) return -10000;
 
-    // Master HD Progressive Streams (highest priority)
-    if (lower.includes('playable_url_quality_hd')) score += 200;
-    if (lower.includes('browser_native_hd_url')) score += 180;
-    if (lower.includes('quality_hd') || lower.includes('_hd') || lower.includes('native_hd')) score += 120;
-    if (lower.includes('/v/t64.') || lower.includes('/v/t39.')) score += 80;
-    if (lower.includes('video.fbcdn.net')) score += 20;
+    // Master HD Progressive Streams (Contains synchronized video + audio in one file)
+    if (lower.includes('playable_url_quality_hd')) score += 350;
+    if (lower.includes('browser_native_hd_url')) score += 320;
+    if (lower.includes('quality_hd') || lower.includes('_hd') || lower.includes('native_hd')) score += 180;
+    if (lower.includes('/v/t64.') || lower.includes('/v/t39.')) score += 120;
+    if (lower.includes('video.fbcdn.net')) score += 30;
 
     // DASH Master Video Stream with bitrate evaluation
     if (meta && meta.isVideo) {
@@ -208,10 +208,10 @@ function scoreVideoUrl(url) {
     else if (lower.includes('480')) score += 10;
     else if (lower.includes('360')) score += 2;
 
-    // Standard definition progressive stream
-    if (lower.includes('playable_url') && !lower.includes('quality_hd')) score += 15;
-    if (lower.includes('browser_native_sd_url')) score += 10;
-    if (lower.includes('.mp4') || lower.includes('.m4v')) score += 10;
+    // Standard definition progressive stream (Contains synchronized video + audio)
+    if (lower.includes('playable_url') && !lower.includes('quality_hd')) score += 80;
+    if (lower.includes('browser_native_sd_url')) score += 70;
+    if (lower.includes('.mp4') || lower.includes('.m4v')) score += 20;
     
     // Low-bitrate preview stream (/v/t42.) - Meta's 360p/480p preview cluster:
     if (lower.includes('/v/t42.')) score -= 120;
@@ -300,25 +300,35 @@ function injectDownloadButtons() {
 
         const isVideo = media.tagName.toLowerCase() === 'video';
 
-        // 1. If media is an image, but is inside a container that has a <video> element, SKIP IT!
-        // (A video's cover/poster image or video placeholder must NEVER get its own button)
+        // 1. If media is an image, only skip if it directly overlaps / acts as a poster for a video element.
+        // Multi-photo posts with background music must NEVER be skipped!
         if (!isVideo) {
-            const videoParent = media.closest(
-                'div[data-pagelet*="Reel"], div[data-pagelet*="Video"], ' +
-                'div[data-video-id], div[role="article"], div[role="main"], ' +
-                'div.x1y1aw1k, div.x10l6tqk'
-            );
-            if (videoParent && videoParent.querySelector('video')) {
-                return; // Video element takes priority! Skip video cover/thumbnail image.
+            const isPhotoTile = !!(media.closest && media.closest(
+                'a[href*="/photo"], a[href*="/photos/"], a[href*="photo.php"], ' +
+                'div[data-visualcompletion*="media"], div[data-visualcompletion="ignore-dynamic-extra-coverage"]'
+            ));
+
+            if (!isPhotoTile) {
+                const immediateVideoWrap = media.closest('div[data-pagelet*="Reel"], div[data-pagelet*="Video"], div[data-video-id], div.x14yjl9h');
+                if (immediateVideoWrap) {
+                    const v = immediateVideoWrap.querySelector('video');
+                    if (v && v !== media) {
+                        const vRect = v.getBoundingClientRect();
+                        const mRect = media.getBoundingClientRect();
+                        if (Math.abs(vRect.left - mRect.left) < 40 && Math.abs(vRect.top - mRect.top) < 40) {
+                            return; // Image is directly overlapping the video element as a poster/cover
+                        }
+                    }
+                }
             }
         }
 
-        // 2. Photo tile deduplication: only 1 media element per tile container
+        // 2. Photo tile deduplication: strictly 1 media element per individual photo container
         if (!isVideo) {
             const tile = media.closest ? media.closest(
                 'a[href*="/photo"], a[href*="/photos/"], a[href*="photo.php"], ' +
                 'div[data-visualcompletion*="media"], div[data-visualcompletion="ignore-dynamic-extra-coverage"], ' +
-                'div.x10l6tqk, div[role="button"][tabindex]'
+                'div[role="button"][tabindex]'
             ) : null;
             if (tile) {
                 if (tile.__toystallerBoundMedia && tile.__toystallerBoundMedia.isConnected && tile.__toystallerBoundMedia !== media) {
@@ -363,12 +373,12 @@ function injectDownloadButtons() {
                     align-items: center;
                     justify-content: center;
                     pointer-events: auto;
-                    opacity: 0.85;
+                    opacity: 0.65;
                     transition: opacity 0.15s ease, background-color 0.15s ease, transform 0.1s ease;
                     box-shadow: 0 2px 6px rgba(0,0,0,0.45);
                     transform: scale(${scale});
                     transform-origin: center;
-                    margin: 0;
+                    margin: 0 3px;
                 `;
 
                 const iconSize = Math.round(16 * scale);
@@ -410,21 +420,21 @@ function injectDownloadButtons() {
                     return finalUrl;
                 };
 
-                // EXACTLY ONE Extension Button per Media Item
+                // Blue Button: Open Video/Image in new tab (Blue hover)
                 const openBtn = document.createElement('button');
                 openBtn.className = 'magic-open-btn';
                 openBtn.title = isVideo ? 'Open HD Video / Reel in new tab' : 'Open photo in new tab';
                 openBtn.innerHTML = `<svg width="${iconSize}" height="${iconSize}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path><polyline points="15 3 21 3 21 9"></polyline><line x1="10" y1="14" x2="21" y2="3"></line></svg>`;
-                openBtn.style.cssText = makeBtnStyle('rgba(24, 119, 242, 0.90)');
+                openBtn.style.cssText = makeBtnStyle('rgba(30, 30, 30, 0.75)');
 
                 openBtn.addEventListener('mouseenter', () => {
                     openBtn.style.opacity = '1';
-                    openBtn.style.backgroundColor = 'rgba(24, 119, 242, 1)';
+                    openBtn.style.backgroundColor = 'rgba(52, 152, 219, 0.95)';
                     openBtn.style.transform = `scale(${scale * 1.08})`;
                 });
                 openBtn.addEventListener('mouseleave', () => {
-                    openBtn.style.opacity = '0.85';
-                    openBtn.style.backgroundColor = 'rgba(24, 119, 242, 0.90)';
+                    openBtn.style.opacity = '0.65';
+                    openBtn.style.backgroundColor = 'rgba(30, 30, 30, 0.75)';
                     openBtn.style.transform = `scale(${scale})`;
                 });
 
@@ -528,6 +538,53 @@ function injectDownloadButtons() {
                 });
 
                 buttons.push(openBtn);
+
+                // Red Button: Open Thumbnail/Poster/Photo in new tab (Red hover)
+                const imgBtn = document.createElement('button');
+                imgBtn.className = 'magic-img-btn';
+                imgBtn.title = isVideo ? 'Open thumbnail in new tab' : 'Open photo in new tab';
+                imgBtn.innerHTML = `<svg width="${iconSize}" height="${iconSize}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path><polyline points="15 3 21 3 21 9"></polyline><line x1="10" y1="14" x2="21" y2="3"></line></svg>`;
+                imgBtn.style.cssText = makeBtnStyle('rgba(30, 30, 30, 0.75)');
+
+                imgBtn.addEventListener('mouseenter', () => {
+                    imgBtn.style.opacity = '1';
+                    imgBtn.style.backgroundColor = 'rgba(231, 76, 60, 0.95)';
+                    imgBtn.style.transform = `scale(${scale * 1.08})`;
+                });
+                imgBtn.addEventListener('mouseleave', () => {
+                    imgBtn.style.opacity = '0.65';
+                    imgBtn.style.backgroundColor = 'rgba(30, 30, 30, 0.75)';
+                    imgBtn.style.transform = `scale(${scale})`;
+                });
+
+                imgBtn.addEventListener('click', (e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+
+                    if (isVideo) {
+                        let poster = media.getAttribute('poster');
+                        if (!poster) {
+                            let current = media;
+                            for (let i = 0; i < 4 && current && !poster; i++) {
+                                const img = current.querySelector ? current.querySelector('img') : null;
+                                if (img && img.src && !img.src.startsWith('data:')) {
+                                    poster = img.src;
+                                }
+                                current = current.parentElement;
+                            }
+                        }
+                        if (poster) {
+                            safeSendMessage({ action: 'openInNewTab', url: poster });
+                        } else {
+                            alert('No thumbnail image available for this video.');
+                        }
+                    } else {
+                        safeSendMessage({ action: 'openInNewTab', url: getHighResImageUrl() });
+                    }
+                });
+
+                buttons.push(imgBtn);
+
                 return buttons;
             };
 

@@ -39,15 +39,17 @@
                         vencodeTag.includes('dash_a') || 
                         lower.includes('dash_audio') || 
                         lower.includes('_audio_') || 
-                        (bitrate > 0 && bitrate < 200000 && !vencodeTag.includes('baseline') && !vencodeTag.includes('video'));
+                        lower.includes('mime=audio') ||
+                        (bitrate > 0 && bitrate < 220000 && !vencodeTag.includes('baseline') && !vencodeTag.includes('video'));
 
         const isVideo = !isAudio && (
             vencodeTag.includes('baseline') || 
             vencodeTag.includes('video') || 
             vencodeTag.includes('dash_v') || 
-            bitrate >= 200000 || 
+            bitrate >= 220000 || 
             lower.includes('.mp4') || 
-            lower.includes('.m4v')
+            lower.includes('.m4v') ||
+            lower.includes('.webm')
         );
 
         return { videoId, vencodeTag, bitrate, isAudio, isVideo };
@@ -158,7 +160,7 @@
                 if (lower.includes('unified_cvc') || lower.includes('bytestart') || lower.includes('byteend')) return false;
                 const isCdn = lower.includes('fbcdn.net') || lower.includes('fbsbx.com');
                 const isVideoExt = lower.includes('.mp4') || lower.includes('.m4v') || lower.includes('.webm');
-                return (isCdn || isVideoExt) && !lower.includes('scontent') && !lower.includes('.jpg') && !lower.includes('.png');
+                return (isCdn || isVideoExt) && !lower.includes('.jpg') && !lower.includes('.jpeg') && !lower.includes('.png') && !lower.includes('.webp');
             },
             shouldSkipReactValue(val) {
                 const lower = (val || '').toLowerCase();

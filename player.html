@@ -24,7 +24,7 @@
       left: 0;
       right: 0;
       height: 56px;
-      background: rgba(18, 19, 23, 0.92);
+      background: rgba(18, 19, 23, 0.94);
       backdrop-filter: blur(14px);
       -webkit-backdrop-filter: blur(14px);
       display: flex;
@@ -60,13 +60,13 @@
     .actions {
       display: flex;
       align-items: center;
-      gap: 12px;
+      gap: 10px;
     }
     .btn {
       display: inline-flex;
       align-items: center;
-      gap: 8px;
-      padding: 8px 16px;
+      gap: 7px;
+      padding: 8px 14px;
       border-radius: 7px;
       font-size: 13px;
       font-weight: 600;
@@ -89,7 +89,7 @@
       color: #e4e6eb;
     }
     .btn-secondary:hover {
-      background: rgba(255, 255, 255, 0.14);
+      background: rgba(255, 255, 255, 0.15);
     }
     .player-container {
       margin-top: 56px;
@@ -100,6 +100,7 @@
       flex-direction: column;
       align-items: center;
       justify-content: center;
+      position: relative;
     }
     .video-frame-wrapper {
       position: relative;
@@ -133,6 +134,31 @@
       width: min(80vh, 85vw);
       height: min(80vh, 85vw);
     }
+    .unmute-banner {
+      position: absolute;
+      bottom: 28px;
+      left: 50%;
+      transform: translateX(-50%);
+      background: rgba(24, 119, 242, 0.95);
+      color: #fff;
+      padding: 10px 22px;
+      border-radius: 30px;
+      font-size: 13.5px;
+      font-weight: 600;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      box-shadow: 0 4px 20px rgba(0, 0, 0, 0.6);
+      z-index: 50;
+      animation: pulse 1.8s infinite;
+      transition: opacity 0.3s ease, transform 0.3s ease;
+    }
+    @keyframes pulse {
+      0% { transform: translateX(-50%) scale(1); }
+      50% { transform: translateX(-50%) scale(1.04); }
+      100% { transform: translateX(-50%) scale(1); }
+    }
     .info {
       margin-top: 14px;
       font-size: 13px;
@@ -148,6 +174,22 @@
       color: #4cd137;
       font-weight: 600;
     }
+    .merge-toast {
+      position: fixed;
+      bottom: 24px;
+      right: 24px;
+      background: #18191e;
+      border: 1px solid rgba(255,255,255,0.12);
+      padding: 12px 20px;
+      border-radius: 8px;
+      box-shadow: 0 8px 24px rgba(0,0,0,0.65);
+      font-size: 13px;
+      color: #fff;
+      display: none;
+      align-items: center;
+      gap: 12px;
+      z-index: 200;
+    }
   </style>
 </head>
 <body>
@@ -158,6 +200,14 @@
       <span class="brand-badge">Facebook Edition</span>
     </div>
     <div class="actions">
+      <button id="dlMergedBtn" class="btn btn-primary" style="display: none;">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
+        Download Merged (Video + Audio)
+      </button>
+      <button id="dlBtn" class="btn btn-primary">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
+        <span id="dlBtnLabel">Download HD Video</span>
+      </button>
       <button id="dlAudioBtn" class="btn btn-secondary" style="display: none;">
         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 18V5l12-2v13"></path><circle cx="6" cy="18" r="3"></circle><circle cx="18" cy="16" r="3"></circle></svg>
         Download Audio
@@ -166,10 +216,6 @@
         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
         Copy Link
       </button>
-      <button id="dlBtn" class="btn btn-primary">
-        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
-        Download HD Video
-      </button>
     </div>
   </div>
 
@@ -177,14 +223,22 @@
     <div class="video-frame-wrapper">
       <video id="videoPlayer" controls autoplay playsinline class="horizontal"></video>
       <audio id="audioPlayer" preload="auto" style="display: none;"></audio>
+      <div id="unmuteBanner" class="unmute-banner" style="display: none;">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><path d="M19.07 4.93a10 10 0 0 1 0 14.14M15.54 8.46a5 5 0 0 1 0 7.07"></path></svg>
+        <span>Click anywhere to unmute sound</span>
+      </div>
     </div>
     <div class="info">
       <span id="resolutionText">Master HD MP4 Stream</span>
       <span>•</span>
       <span class="info-pill" id="qualityPill">Original Quality</span>
       <span>•</span>
-      <span>Direct Audio + Video</span>
+      <span id="audioStatusText">Synchronized Sound</span>
     </div>
+  </div>
+
+  <div id="mergeToast" class="merge-toast">
+    <span id="mergeStatus">Merging video and audio...</span>
   </div>
 
   <script src="player.js"></script>
