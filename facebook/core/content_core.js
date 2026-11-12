@@ -46,6 +46,94 @@ function bootToystaller() {
     }
 }
 
+// --- Automated Background Reel Extraction Workflow ---
+(function checkAutoExtractMode() {
+    const params = new URLSearchParams(window.location.search);
+    if (!params.has('toystaller_auto')) return;
+
+    // Elegant status banner
+    const banner = document.createElement('div');
+    banner.id = 'toystaller-auto-loader';
+    banner.style.cssText = `
+        position: fixed; top: 24px; left: 50%; transform: translateX(-50%);
+        background: rgba(18, 19, 23, 0.95); color: #fff; padding: 12px 28px;
+        border-radius: 30px; z-index: 2147483647; font-family: -apple-system, sans-serif;
+        font-size: 14px; font-weight: 600; box-shadow: 0 8px 32px rgba(0,0,0,0.8);
+        display: flex; align-items: center; gap: 12px; border: 1px solid rgba(255,255,255,0.15);
+    `;
+    banner.innerHTML = `
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#1877f2" stroke-width="2.5" style="animation: spin 0.8s linear infinite;">
+            <circle cx="12" cy="12" r="10" stroke-opacity="0.25"></circle>
+            <path d="M12 2a10 10 0 0 1 10 10"></path>
+        </svg>
+        <span>Loading Master HD Video & Audio...</span>
+        <style>@keyframes spin { 100% { transform: rotate(360deg); } }</style>
+    `;
+    document.documentElement.appendChild(banner);
+
+    // Mute and pause native video so user doesn't hear double audio
+    const silenceVideo = () => {
+        document.querySelectorAll('video').forEach(v => {
+            try { v.muted = true; v.pause(); } catch(e) {}
+        });
+    };
+    silenceVideo();
+    setInterval(silenceVideo, 300);
+
+    let attempts = 0;
+    const pollForStream = () => {
+        attempts++;
+        const video = document.querySelector('video');
+        if (!video && attempts < 25) {
+            setTimeout(pollForStream, 200);
+            return;
+        }
+
+        const platform = PlatformManager.getPlatform();
+        const currentId = platform.extractVideoId ? platform.extractVideoId(video) : null;
+
+        const magicId = Math.random().toString(36).substring(2, 15);
+        if (video) video.setAttribute('data-toystaller-active', magicId);
+
+        let resolved = false;
+        const handler = (e) => {
+            if (!e.data || e.data.type !== 'magic_response_react_url_' + magicId) return;
+            if (resolved) return;
+            resolved = true;
+            window.removeEventListener('message', handler);
+
+            const videoUrl = cleanVideoUrl(e.data.url);
+            const audioUrl = cleanVideoUrl(e.data.audioUrl);
+
+            if (videoUrl && isValidVideoUrl(videoUrl)) {
+                banner.innerHTML = `<span>Ready! Opening Player...</span>`;
+                chrome.runtime.sendMessage({
+                    action: 'autoExtractDone',
+                    url: videoUrl,
+                    audioUrl: audioUrl
+                });
+            } else if (attempts < 25) {
+                setTimeout(pollForStream, 300);
+            }
+        };
+
+        window.addEventListener('message', handler);
+        window.postMessage({ type: 'magic_get_react_url', id: magicId, isVideo: true, videoId: currentId }, '*');
+
+        setTimeout(() => {
+            if (!resolved) {
+                resolved = true;
+                window.removeEventListener('message', handler);
+                if (attempts < 25) {
+                    setTimeout(pollForStream, 300);
+                }
+            }
+        }, 500);
+    };
+
+    setTimeout(pollForStream, 500);
+})();
+
 const pageInterceptedVideoUrls = new Set();
 window.addEventListener('message', (e) => {
     if (!e.data) return;
@@ -290,7 +378,20 @@ function injectDownloadButtons() {
         window.magicOverlayManager.updateAllPositions();
     }
 
-    const mediaElements = document.querySelectorAll('video, img, svg image, image, div[role="img"]');
+    const mediaElements = Array.from(document.querySelectorAll('video, img, svg image, image, div[role="img"]')).filter(media => {
+        // Skip background divs that contain real img or video elements
+        if (media.tagName.toLowerCase() === 'div') {
+            if (media.querySelector('img, video, svg image, image')) return false;
+            const bg = window.getComputedStyle(media).backgroundImage;
+            if (!bg || bg === 'none' || !bg.startsWith('url(')) return false;
+        }
+
+        // Strict DOM-level attribute check: prevents duplicate overlay attachments across cycles or scripts
+        if (media.getAttribute('data-toystaller-bound') === 'true') return false;
+        if (media.closest('[data-toystaller-bound="true"]')) return false;
+
+        return true;
+    });
 
     mediaElements.forEach(media => {
         if (platform.isThumbnail(media)) return;
@@ -352,6 +453,11 @@ function injectDownloadButtons() {
         }
 
         if (window.magicOverlayManager && !window.magicOverlayManager.overlays.has(media)) {
+            media.setAttribute('data-toystaller-bound', 'true');
+            if (media.parentElement && (media.parentElement.getAttribute('role') === 'img' || media.parentElement.tagName.toLowerCase() === 'div')) {
+                media.parentElement.setAttribute('data-toystaller-bound', 'true');
+            }
+
             const magicId = Math.random().toString(36).substring(2, 15);
             if (isVideo) {
                 media.dataset.magicId = magicId;
@@ -508,7 +614,13 @@ function injectDownloadButtons() {
                                 url = null;
                             }
 
-                            if (url && isValidVideoUrl(url)) {
+                            const isMasterProgressive = url && (
+                                url.toLowerCase().includes('playable_url_quality_hd') ||
+                                url.toLowerCase().includes('browser_native_hd_url') ||
+                                url.toLowerCase().includes('hd_src')
+                            );
+
+                            if (url && isValidVideoUrl(url) && (audioUrl || isMasterProgressive)) {
                                 openBtn.style.opacity = '1';
                                 openBtn.style.pointerEvents = 'auto';
                                 openBtn.__resolvedVideoUrl = url;
@@ -519,7 +631,10 @@ function injectDownloadButtons() {
                                     audio: audioUrl
                                 });
                                 openVideo(url, audioUrl);
-                            } else if (attempts < maxAttempts) {
+                                return;
+                            }
+
+                            if (attempts < maxAttempts) {
                                 console.log(`[Toystaller] Stream buffering (attempt ${attempts}/${maxAttempts}), retrying in 350ms...`);
                                 if (media.paused && media.currentTime === 0) {
                                     try { media.play().catch(() => {}); } catch(e) {}
@@ -528,8 +643,22 @@ function injectDownloadButtons() {
                             } else {
                                 openBtn.style.opacity = '1';
                                 openBtn.style.pointerEvents = 'auto';
-                                console.warn(`[Toystaller] Stream timed out for Reel [${currentId}].`);
-                                alert('Toystaller: Facebook has not loaded the media stream for this Reel yet.\n\nTip: Please let the Reel play for a second so it buffers, then click the button again.');
+
+                                // Automatic seamless background reload extraction:
+                                // Reloads the Reel URL in backend pipeline to extract master progressive stream with audio
+                                const reelUrl = currentId ? `https://www.facebook.com/reel/${currentId}` : (window.location.href.includes('/reel/') ? window.location.href : null);
+                                if (reelUrl) {
+                                    console.log(`[Toystaller] Launching seamless reload extraction for [${currentId}]...`);
+                                    safeSendMessage({
+                                        action: 'autoReloadReelAndOpen',
+                                        reelUrl: reelUrl,
+                                        videoId: currentId
+                                    });
+                                } else if (url && isValidVideoUrl(url)) {
+                                    openVideo(url, audioUrl);
+                                } else {
+                                    alert('Toystaller: Could not load the media stream for this Reel.\n\nTip: Please let the Reel play for a second, then click the button again.');
+                                }
                             }
                         }, true, currentId);
                     };

@@ -529,10 +529,11 @@ class OverlayManager {
     isSiteControl(el, media) {
         if (!el || el === document.documentElement || el === document.body) return false;
         if (el.closest('.magic-dl-overlay')) return false;
-        if (el === media || media.contains(el)) return false;
+        // Never consider the media element, its descendants, or its ancestors (like photo link/button wrappers) as conflicting site controls
+        if (el === media || media.contains(el) || el.contains(media)) return false;
 
         const entry = this.overlays.get(media);
-        if (entry && (el === entry.hoverHost || entry.hoverHost.contains(el))) return false;
+        if (entry && (el === entry.hoverHost || entry.hoverHost.contains(el) || el.contains(entry.hoverHost))) return false;
 
         const tag = el.tagName.toLowerCase();
         const role = (el.getAttribute('role') || '').toLowerCase();
@@ -563,7 +564,7 @@ class OverlayManager {
         if (platform && platform.getPlatformConfig) {
             return platform.getPlatformConfig(window.location.pathname.toLowerCase(), media);
         }
-        return { preferredCorners: ['top-left', 'bottom-left', 'top-right'], padding: 12 };
+        return { preferredCorners: ['top-right', 'bottom-right'], padding: 12 };
     }
 
     cornerHasConflict(media, rect, corner, width, height, pad = 12) {
@@ -625,7 +626,7 @@ class OverlayManager {
             }
         }
 
-        return corners[0] || 'top-left';
+        return corners[0] || 'top-right';
     }
 
     // Compute the actually visible portion of a media element by intersecting

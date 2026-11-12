@@ -112,6 +112,32 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         });
         sendResponse({ success: true });
         return true;
+    } else if (request.action === 'autoReloadReelAndOpen') {
+        const reelUrl = request.reelUrl;
+        const targetUrl = reelUrl + (reelUrl.includes('?') ? '&' : '?') + 'toystaller_auto=1';
+        const tabProps = { url: targetUrl, active: true };
+        if (sender.tab && sender.tab.windowId) {
+            tabProps.windowId = sender.tab.windowId;
+            if (typeof sender.tab.index === 'number') tabProps.index = sender.tab.index + 1;
+        }
+        chrome.tabs.create(tabProps);
+        sendResponse({ success: true });
+        return true;
+    } else if (request.action === 'autoExtractDone') {
+        const tabId = sender.tab ? sender.tab.id : null;
+        const url = request.url;
+        const audioUrl = request.audioUrl;
+        let playerUrl = chrome.runtime.getURL('player.html') + '?url=' + encodeURIComponent(url);
+        if (audioUrl) {
+            playerUrl += '&audio=' + encodeURIComponent(audioUrl);
+        }
+        if (tabId) {
+            chrome.tabs.update(tabId, { url: playerUrl });
+        } else {
+            chrome.tabs.create({ url: playerUrl, active: true });
+        }
+        sendResponse({ success: true });
+        return true;
     }
 });
 
