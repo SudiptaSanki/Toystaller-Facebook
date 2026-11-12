@@ -314,15 +314,23 @@ class OverlayManager {
             const inHost = this._pointInRect(x, y, hRect);
 
             if (inMedia || inHost) {
-                const belongs = hits.some(el => {
-                    if (el === media || media.contains(el)) return true;
-                    if (entry.hoverHost && (el === entry.hoverHost || entry.hoverHost.contains(el))) return true;
-                    const card = media.closest('a[href*="/reel"], a[href*="/reels"], div[data-pagelet*="Reel"], div[role="article"], div[role="listitem"]');
-                    if (card && (el === card || card.contains(el))) return true;
-                    return false;
-                });
-                if (belongs && !matchedCandidates.includes(candidate)) {
-                    matchedCandidates.push(candidate);
+                // If cursor is directly inside the media rectangle, accept immediately!
+                // (Bypasses Facebook's transparent click-interceptor / overlay wrappers)
+                if (inMedia) {
+                    if (!matchedCandidates.includes(candidate)) {
+                        matchedCandidates.push(candidate);
+                    }
+                } else {
+                    const belongs = hits.some(el => {
+                        if (el === media || media.contains(el)) return true;
+                        if (entry.hoverHost && (el === entry.hoverHost || entry.hoverHost.contains(el))) return true;
+                        const card = media.closest('a[href*="/reel"], a[href*="/reels"], div[data-pagelet*="Reel"], div[role="article"], div[role="listitem"], div[data-pagelet*="FeedUnit"], div.x1y1aw1k');
+                        if (card && (el === card || card.contains(el))) return true;
+                        return false;
+                    });
+                    if (belongs && !matchedCandidates.includes(candidate)) {
+                        matchedCandidates.push(candidate);
+                    }
                 }
             }
         }
@@ -382,6 +390,41 @@ class OverlayManager {
     addOverlay(media, createButtonsFn) {
         if (this.overlays.has(media)) return;
 
+        // Deduplication: prevent multiple overlays on overlapping images (e.g. blur placeholder + actual photo)
+        const mRect = media.getBoundingClientRect();
+        if (mRect.width > 0 && mRect.height > 0) {
+            for (const [existingMedia, existingEntry] of this.overlays.entries()) {
+                if (existingMedia === media) return;
+                const eRect = existingMedia.getBoundingClientRect();
+                const intersectL = Math.max(mRect.left, eRect.left);
+                const intersectT = Math.max(mRect.top, eRect.top);
+                const intersectR = Math.min(mRect.right, eRect.right);
+                const intersectB = Math.min(mRect.bottom, eRect.bottom);
+                const iW = Math.max(0, intersectR - intersectL);
+                const iH = Math.max(0, intersectB - intersectT);
+                const iArea = iW * iH;
+                const mArea = mRect.width * mRect.height;
+                const eArea = eRect.width * eRect.height;
+
+                if (mArea > 0 && eArea > 0 && (iArea / mArea > 0.55 || iArea / eArea > 0.55)) {
+                    // Both media elements cover the exact same visual photo card
+                    const mRes = (media.naturalWidth || 0) * (media.naturalHeight || 0);
+                    const eRes = (existingMedia.naturalWidth || 0) * (existingMedia.naturalHeight || 0);
+                    if (mRes > eRes) {
+                        // Replace lower-res placeholder overlay with higher-res overlay
+                        existingEntry.container.remove();
+                        if (existingEntry.resizeObserver) existingEntry.resizeObserver.disconnect();
+                        if (existingEntry.intersectionObserver) existingEntry.intersectionObserver.disconnect();
+                        this.overlays.delete(existingMedia);
+                        break;
+                    } else {
+                        // Existing overlay is already on the better element
+                        return;
+                    }
+                }
+            }
+        }
+
         const platform = this._getPlatform();
         const hasModal = platform && platform.hasActiveModal ? platform.hasActiveModal() : false;
         if (hasModal && platform && platform.isInsideModal && !platform.isInsideModal(media)) {
@@ -436,7 +479,7 @@ class OverlayManager {
             resizeObserver.observe(hoverHost);
         }
 
-        const entry = { container, corner: null, resizeObserver, hoverHost, isVisible: false, intersectionObserver: null };
+        const entry = { container, corner: null, resizeObserver, hoverHost, isVisible: true, intersectionObserver: null };
         
         entry.intersectionObserver = new IntersectionObserver((entries) => {
             for (const e of entries) {

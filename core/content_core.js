@@ -240,7 +240,7 @@ function injectDownloadButtons() {
         window.magicOverlayManager.updateAllPositions();
     }
 
-    const mediaElements = document.querySelectorAll('video, img, svg image, image');
+    const mediaElements = document.querySelectorAll('video, img, svg image, image, div[role="img"]');
 
     mediaElements.forEach(media => {
         if (platform.isThumbnail(media)) return;
@@ -287,6 +287,12 @@ function injectDownloadButtons() {
                         finalUrl = media.getAttribute('xlink:href') || 
                                    media.getAttribute('href') || 
                                    (media.href && media.href.baseVal ? media.href.baseVal : null);
+                    }
+                    if (!finalUrl && (media.tagName.toLowerCase() === 'div' || media.getAttribute('role') === 'img')) {
+                        const bg = window.getComputedStyle(media).backgroundImage;
+                        if (bg && bg.startsWith('url(')) {
+                            finalUrl = bg.replace(/^url\(["']?/, '').replace(/["']?\)$/, '');
+                        }
                     }
                     
                     if (media.srcset) {
@@ -509,75 +515,86 @@ function injectDownloadButtons() {
             };
 
             const getMediaUrlFallback = (callback, silent = false, videoId = null) => {
-                // 1. Direct scan of document <script> tags strictly matching videoId
-                if (isVideo && videoId) {
+                const candidates = [];
+
+                // 1. Direct scan of document <script> tags matching videoId
+                if (isVideo) {
                     const scripts = document.querySelectorAll('script[type="application/json"], script:not([src])');
-                    const scriptCandidates = [];
-                    for (const s of scripts) {
-                        const text = s.textContent;
-                        if (text && text.includes(videoId)) {
-                            const cdnRegex = /"(https:(?:\\\/\\\/|\/\/)[^"]+?(?:fbcdn\.net|fbsbx\.com)[^"]+?\.(?:mp4|m4v)[^"]*)"/g;
-                            let m;
-                            while ((m = cdnRegex.exec(text)) !== null) {
-                                try {
-                                    const u = cleanVideoUrl(JSON.parse('"' + m[1] + '"'));
-                                    if (u && isValidVideoUrl(u)) scriptCandidates.push(u);
-                                } catch(e) {
-                                    const u = cleanVideoUrl(m[1]);
-                                    if (u && isValidVideoUrl(u)) scriptCandidates.push(u);
+                    const cdnRegex = /"(https:(?:\\\/\\\/|\/\/)[^"]+?(?:fbcdn\.net|fbsbx\.com)[^"]+?\.(?:mp4|m4v)[^"]*)"/g;
+                    
+                    if (videoId) {
+                        for (const s of scripts) {
+                            const text = s.textContent;
+                            if (text && text.includes(videoId)) {
+                                let m;
+                                while ((m = cdnRegex.exec(text)) !== null) {
+                                    try {
+                                        const u = cleanVideoUrl(JSON.parse('"' + m[1] + '"'));
+                                        if (u && isValidVideoUrl(u)) candidates.push(u);
+                                    } catch(e) {
+                                        const u = cleanVideoUrl(m[1]);
+                                        if (u && isValidVideoUrl(u)) candidates.push(u);
+                                    }
                                 }
                             }
                         }
                     }
-                    if (scriptCandidates.length > 0) {
-                        const best = pickBestVideoUrl(scriptCandidates);
-                        if (best && isValidVideoUrl(best)) {
-                            callback(best);
-                            return;
-                        }
-                    }
-                }
 
-                // 2. Only check global intercepted URLs if there is a single video on the entire page
-                const totalVideos = document.querySelectorAll('video').length;
-                if (isVideo && totalVideos <= 1 && pageInterceptedVideoUrls.size > 0) {
-                    const cleaned = Array.from(pageInterceptedVideoUrls).map(cleanVideoUrl).filter(Boolean);
-                    const candidates = cleaned.filter(isValidVideoUrl);
-                    const filtered = platform.filterBackgroundUrls ? platform.filterBackgroundUrls(candidates, true) : candidates;
-
-                    if (filtered.length > 0) {
-                        const best = pickBestVideoUrl(filtered);
-                        if (best && isValidVideoUrl(best)) {
-                            callback(best);
-                            return;
-                        }
-                    }
-                }
-
-                // 3. Fallback to background script webRequest (only for single-video pages)
-                if (totalVideos <= 1) {
-                    safeSendMessage({ action: 'getMediaUrls', mediaType: isVideo ? 'video' : 'img' }, (response) => {
-                        if (response && response.urls && response.urls.length > 0) {
-                            const cleaned = response.urls.map(cleanVideoUrl).filter(Boolean);
-                            const candidates = cleaned.filter(isValidVideoUrl);
-                            if (candidates.length > 0) {
-                                const best = pickBestVideoUrl(candidates);
-                                if (best && isValidVideoUrl(best)) {
-                                    callback(best);
-                                    return;
+                    // If no candidate was found for videoId, scan scripts with playable video keys
+                    if (candidates.length === 0) {
+                        for (const s of scripts) {
+                            const text = s.textContent;
+                            if (text && (text.includes('playable_url_quality_hd') || text.includes('browser_native_hd_url') || text.includes('playable_url'))) {
+                                let m;
+                                while ((m = cdnRegex.exec(text)) !== null) {
+                                    try {
+                                        const u = cleanVideoUrl(JSON.parse('"' + m[1] + '"'));
+                                        if (u && isValidVideoUrl(u)) candidates.push(u);
+                                    } catch(e) {
+                                        const u = cleanVideoUrl(m[1]);
+                                        if (u && isValidVideoUrl(u)) candidates.push(u);
+                                    }
                                 }
                             }
                         }
-                        if (!silent) {
-                            alert('Could not find the HD video URL yet.\n\nTip: Make sure the video has started playing, then click the button again.');
-                        }
-                    });
-                    return;
+                    }
                 }
 
-                if (!silent) {
-                    alert('Could not find the HD video URL yet.\n\nTip: Make sure the video has started playing, then click the button again.');
+                // 2. Check in-memory intercepted video URLs from fetch/XHR
+                if (isVideo && pageInterceptedVideoUrls.size > 0) {
+                    for (const u of pageInterceptedVideoUrls) {
+                        const clean = cleanVideoUrl(u);
+                        if (clean && isValidVideoUrl(clean)) {
+                            candidates.push(clean);
+                        }
+                    }
                 }
+
+                if (candidates.length > 0) {
+                    const best = pickBestVideoUrl(candidates);
+                    if (best && isValidVideoUrl(best)) {
+                        callback(best);
+                        return;
+                    }
+                }
+
+                // 3. Fallback to background script webRequest
+                safeSendMessage({ action: 'getMediaUrls', mediaType: isVideo ? 'video' : 'img' }, (response) => {
+                    if (response && response.urls && response.urls.length > 0) {
+                        const cleaned = response.urls.map(cleanVideoUrl).filter(Boolean);
+                        const bgCandidates = cleaned.filter(isValidVideoUrl);
+                        if (bgCandidates.length > 0) {
+                            const best = pickBestVideoUrl(bgCandidates);
+                            if (best && isValidVideoUrl(best)) {
+                                callback(best);
+                                return;
+                            }
+                        }
+                    }
+                    if (!silent) {
+                        alert('Could not find the HD video URL yet.\n\nTip: Make sure the video has started playing, then click the button again.');
+                    }
+                });
             };
 
             if (window.magicOverlayManager) {

@@ -166,7 +166,7 @@ window.ToystallerPlatforms = window.ToystallerPlatforms || {};
                 return { preferredCorners: ['top-left', 'bottom-left'], padding: 16, topOffset: 48 };
             }
             if (section === 'feed') {
-                return { preferredCorners: ['top-left', 'top-right', 'bottom-left'], padding: 12 };
+                return { preferredCorners: ['top-left', 'bottom-left'], padding: 12 };
             }
             if (section === 'groups') {
                 return { preferredCorners: ['top-left', 'top-right', 'bottom-left'], padding: 12 };
@@ -388,14 +388,12 @@ window.ToystallerPlatforms = window.ToystallerPlatforms || {};
                     // Reel / Story carousel cards in feed
                     const isReelOrStoryCard = media.closest('a[href*="/reel"], a[href*="/reels"], div[data-pagelet*="Reels" i], div[data-pagelet*="Stories" i], div[data-pagelet*="Reel_"], div[aria-label*="Reels" i]');
                     if (isReelOrStoryCard) {
-                        if (rect.width >= 50 && rect.height >= 70) return false;
+                        if (rect.width >= 45 && rect.height >= 60) return false;
                     }
 
-                    const inArticle = media.closest('[role="article"], div[data-pagelet*="FeedUnit"]');
-                    if (inArticle) {
-                        if (rect.width >= 80 && rect.height >= 80) return false;
-                    }
-                    if (rect.width >= 90 && rect.height >= 90) return false;
+                    // Any post photo on feed
+                    if (rect.width >= 65 && rect.height >= 65) return false;
+                    if (naturalW >= 65 && naturalH >= 65) return false;
                     return true;
                 }
 

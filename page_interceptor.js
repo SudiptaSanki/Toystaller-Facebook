@@ -13,10 +13,19 @@
     // Maps videoId -> { id, hd, sd, allUrls: Set, timestamp }
     const videoStoreById = new Map();
     const recentVideosMRU = []; // Ordered list of videoIds, most recent first (max 50)
+    const recentUrlsPool = []; // Recent valid video URLs regardless of ID (max 50)
 
     function recordVideoEntry(videoId, hdUrl, sdUrl, extraUrl) {
         if (!videoId && !hdUrl && !sdUrl && !extraUrl) return;
         const id = videoId ? String(videoId).trim() : null;
+
+        const bestUrl = hdUrl || sdUrl || extraUrl;
+        if (bestUrl && isValidVideo(bestUrl)) {
+            const idx = recentUrlsPool.indexOf(bestUrl);
+            if (idx !== -1) recentUrlsPool.splice(idx, 1);
+            recentUrlsPool.unshift(bestUrl);
+            if (recentUrlsPool.length > 50) recentUrlsPool.pop();
+        }
 
         let entry = id ? videoStoreById.get(id) : null;
         if (!entry) {
@@ -452,7 +461,12 @@
         const reqId = e.data.id;
         const isVideo = e.data.isVideo !== undefined ? e.data.isVideo : true;
         const requestedVideoId = e.data.videoId ? String(e.data.videoId).trim() : null;
-        const el = document.querySelector(`[data-magic-id="${reqId}"]`);
+        let el = document.querySelector(`[data-magic-id="${reqId}"]`);
+        if (!el && isVideo) {
+            // Fallback: look for playing or visible video in viewport
+            const videos = Array.from(document.querySelectorAll('video'));
+            el = videos.find(v => !v.paused || v.currentTime > 0) || videos[0];
+        }
 
         let url = null;
 
@@ -485,6 +499,11 @@
                 if (platform.extractVideoUrlFromDOM) {
                     url = platform.extractVideoUrlFromDOM(el);
                 }
+            }
+
+            // 5. Check recent intercepted video URLs pool
+            if (!url && recentUrlsPool.length > 0) {
+                url = recentUrlsPool[0];
             }
         } else {
             if (el) {

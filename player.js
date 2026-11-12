@@ -45,6 +45,7 @@
 
             if (resText) {
                 resText.textContent = `${w} × ${h} • ${qualityTag}`;
+                resText.style.color = '#8a8d91';
             }
             if (qualityPill) {
                 qualityPill.textContent = (w >= 1280 || h >= 1280) ? 'Master HD' : 'Direct Stream';
@@ -53,13 +54,10 @@
     });
 
     player.addEventListener('error', () => {
-        if (videoUrl && !videoUrl.startsWith('blob:') && !videoUrl.startsWith('data:')) {
-            window.location.replace(videoUrl);
-        } else {
-            if (resText) {
-                resText.textContent = 'Unable to stream directly. Please click "Download HD Video" above to save the file.';
-                resText.style.color = '#e74c3c';
-            }
+        // DO NOT redirect top-level window to Facebook CDN! (Meta CDN blocks document navigations)
+        if (resText) {
+            resText.textContent = 'Streaming preview restricted by CDN. Please click "Download HD Video" above to save the full file.';
+            resText.style.color = '#e74c3c';
         }
     });
 
@@ -89,6 +87,14 @@
                         Download HD Video
                     `;
                 }, 2500);
+            } else {
+                // Fallback to direct anchor download
+                const a = document.createElement('a');
+                a.href = videoUrl;
+                a.download = filename;
+                document.body.appendChild(a);
+                a.click();
+                a.remove();
             }
         });
     });
