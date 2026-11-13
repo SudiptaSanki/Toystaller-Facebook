@@ -76,23 +76,30 @@ function bootToystaller() {
         document.querySelectorAll('video').forEach(v => {
             try { 
                 v.muted = false; 
-                v.volume = 0.5; 
-                v.play().catch(() => {}); 
+                v.volume = 1.0; 
+                if (v.paused) v.play().catch(() => {}); 
             } catch(e) {}
         });
-        const muteBtns = document.querySelectorAll('[aria-label*="Unmute" i], [aria-label*="unmute" i]');
-        muteBtns.forEach(b => {
-            try { b.click(); } catch(e) {}
+        const soundBtns = document.querySelectorAll(
+            '[aria-label*="unmute" i], [aria-label*="Unmute" i], ' +
+            '[aria-label*="Turn on sound" i], [aria-label*="sound" i], ' +
+            '[aria-label*="volume" i]'
+        );
+        soundBtns.forEach(b => {
+            const label = (b.getAttribute('aria-label') || '').toLowerCase();
+            if (label.includes('unmute') || label.includes('turn on') || b.getAttribute('aria-pressed') === 'false') {
+                try { b.click(); } catch(e) {}
+            }
         });
     };
     unmuteAndPlay();
-    const playInterval = setInterval(unmuteAndPlay, 400);
+    const playInterval = setInterval(unmuteAndPlay, 300);
 
     let attempts = 0;
     const pollForStream = () => {
         attempts++;
         const video = document.querySelector('video');
-        if (!video && attempts < 25) {
+        if (!video && attempts < 30) {
             setTimeout(pollForStream, 200);
             return;
         }
@@ -112,8 +119,25 @@ function bootToystaller() {
 
             const videoUrl = cleanVideoUrl(e.data.url);
             const audioUrl = cleanVideoUrl(e.data.audioUrl);
+            const isMasterProg = isProgressiveStream(videoUrl);
+            const hasSound = !!audioUrl || isMasterProg;
 
-            if (videoUrl && isValidVideoUrl(videoUrl)) {
+            if (videoUrl && isValidVideoUrl(videoUrl) && hasSound) {
+                clearInterval(playInterval);
+                banner.innerHTML = `<span>Ready! Opening Player with Sound...</span>`;
+                chrome.runtime.sendMessage({
+                    action: 'autoExtractDone',
+                    url: videoUrl,
+                    audioUrl: audioUrl,
+                    fbUrl: window.location.href.split('?')[0],
+                    videoId: currentId || ''
+                });
+            } else if (attempts < 25) {
+                // Sound still loading or Facebook player unmute in progress, retry!
+                unmuteAndPlay();
+                setTimeout(pollForStream, 350);
+            } else if (videoUrl && isValidVideoUrl(videoUrl)) {
+                // Exhausted all attempts, open best available
                 clearInterval(playInterval);
                 banner.innerHTML = `<span>Ready! Opening Player...</span>`;
                 chrome.runtime.sendMessage({
@@ -123,8 +147,6 @@ function bootToystaller() {
                     fbUrl: window.location.href.split('?')[0],
                     videoId: currentId || ''
                 });
-            } else if (attempts < 25) {
-                setTimeout(pollForStream, 300);
             }
         };
 
@@ -135,8 +157,8 @@ function bootToystaller() {
             if (!resolved) {
                 resolved = true;
                 window.removeEventListener('message', handler);
-                if (attempts < 25) {
-                    setTimeout(pollForStream, 300);
+                if (attempts < 30) {
+                    setTimeout(pollForStream, 350);
                 }
             }
         }, 500);
@@ -753,6 +775,38 @@ function injectDownloadButtons() {
                     }
 
                     // --- Video / Reel Extraction ---
+                    const ensureFacebookSoundOn = (v) => {
+                        if (!v) return;
+                        try {
+                            v.muted = false;
+                            v.volume = 1.0;
+                        } catch(e) {}
+
+                        const container = v.closest('div[role="article"], div[data-pagelet*="FeedUnit"], div[data-pagelet*="Reel"], div.x1y1aw1k') || document.body;
+                        if (container) {
+                            const soundButtons = container.querySelectorAll(
+                                '[aria-label*="unmute" i], [aria-label*="Unmute" i], ' +
+                                '[aria-label*="sound" i], [aria-label*="volume" i], ' +
+                                '[aria-label*="Turn on sound" i]'
+                            );
+                            for (const btn of soundButtons) {
+                                const label = (btn.getAttribute('aria-label') || '').toLowerCase();
+                                if (label.includes('unmute') || label.includes('turn on') || btn.getAttribute('aria-pressed') === 'false') {
+                                    try {
+                                        btn.click();
+                                        console.log('[Toystaller] Automatically unmuted Facebook sound button:', btn);
+                                        break;
+                                    } catch(e) {}
+                                }
+                            }
+                        }
+
+                        try { v.dispatchEvent(new Event('volumechange')); } catch(e) {}
+                        if (v.paused) {
+                            try { v.play().catch(() => {}); } catch(e) {}
+                        }
+                    };
+
                     const openVideo = (url, audioUrl, optVideoId) => {
                         const clean = cleanVideoUrl(url);
                         const cleanAudio = cleanVideoUrl(audioUrl);
@@ -774,6 +828,9 @@ function injectDownloadButtons() {
 
                     const currentId = platform.extractVideoId ? platform.extractVideoId(media) : null;
                     console.log(`[Toystaller] Clicked Video/Reel element. Extracted target ID: [${currentId}]`);
+
+                    // Ensure Facebook sound is on so Facebook's DASH client actively requests audio chunks
+                    ensureFacebookSoundOn(media);
 
                     // Always clear resolution cache on click to guarantee we extract the fresh, active video
                     delete openBtn.__resolvedVideoUrl;
@@ -814,7 +871,12 @@ function injectDownloadButtons() {
                                     openBtn.style.opacity = '1';
                                     openBtn.style.pointerEvents = 'auto';
                                     if (res && res.url && isValidVideoUrl(res.url)) {
-                                        openVideo(res.url, res.audioUrl, targetVideoId);
+                                        // DO NOT downgrade a 1080p stream to 360p SD:
+                                        if (res.quality === 'SD MP4' && (url.includes('1080') || url.includes('/v/t64.') || !url.includes('sd_src'))) {
+                                            openVideo(url, res.audioUrl, targetVideoId);
+                                        } else {
+                                            openVideo(res.url, res.audioUrl, targetVideoId);
+                                        }
                                     } else {
                                         openVideo(url, null, targetVideoId);
                                     }
@@ -828,9 +890,7 @@ function injectDownloadButtons() {
 
                             if (attempts < maxAttempts) {
                                 console.log(`[Toystaller] Stream buffering (attempt ${attempts}/${maxAttempts}), retrying in 350ms...`);
-                                if (media.paused && media.currentTime === 0) {
-                                    try { media.play().catch(() => {}); } catch(e) {}
-                                }
+                                ensureFacebookSoundOn(media);
                                 setTimeout(tryExtract, 350);
                             } else {
                                 openBtn.style.opacity = '1';

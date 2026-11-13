@@ -413,6 +413,8 @@
     }
 
     // --- Real-time Network Interception of Live Stream Chunks ---
+    let lastInterceptedAudio = { url: null, videoId: null, timestamp: 0 };
+
     function processInterceptedMediaUrl(rawUrl) {
         if (!rawUrl || typeof rawUrl !== 'string') return;
         if (!rawUrl.includes('fbcdn.net') && !rawUrl.includes('fbsbx.com')) return;
@@ -421,6 +423,9 @@
         if (!clean) return;
 
         const meta = parseStreamMetadata(clean);
+        if (meta && meta.isAudio) {
+            lastInterceptedAudio = { url: clean, videoId: meta.videoId, timestamp: Date.now() };
+        }
         if (meta && meta.videoId) {
             console.log(`[Toystaller] Intercepted stream for Reel/Video [${meta.videoId}]:`, {
                 isAudio: meta.isAudio,
@@ -914,11 +919,17 @@
                 }
             }
 
-            // 6. If we found a video URL, resolve companion audio track if needed
-            if (url && !audioUrl && verifiedId && videoStoreById.has(verifiedId)) {
-                const entry = videoStoreById.get(verifiedId);
+            // 6. If we found a video URL, resolve companion audio track
+            const vid = verifiedId || requestedVideoId;
+            if (url && !audioUrl && vid && videoStoreById.has(vid)) {
+                const entry = videoStoreById.get(vid);
                 if (entry && entry.dashAudio) {
                     audioUrl = entry.dashAudio;
+                }
+            }
+            if (url && !audioUrl && lastInterceptedAudio.url && (Date.now() - lastInterceptedAudio.timestamp < 15000)) {
+                if (!lastInterceptedAudio.videoId || !vid || lastInterceptedAudio.videoId === vid) {
+                    audioUrl = lastInterceptedAudio.url;
                 }
             }
 
