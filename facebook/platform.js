@@ -195,13 +195,13 @@ window.ToystallerPlatforms = window.ToystallerPlatforms || {};
 
         // --- Modal & Theater Mode Detection ---
         hasActiveModal() {
-            const dialogs = document.querySelectorAll('[role="dialog"], [aria-modal="true"], div[data-pagelet="MediaViewer"], div.layerContainer');
+            const dialogs = document.querySelectorAll('[role="dialog"], [aria-modal="true"], div[data-pagelet="MediaViewer"]');
             for (const d of dialogs) {
                 if (d.isConnected) {
                     const style = window.getComputedStyle(d);
                     if (style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0') {
                         const rect = d.getBoundingClientRect();
-                        if (rect.width > 60 && rect.height > 60) {
+                        if (rect.width > 80 && rect.height > 80) {
                             return true;
                         }
                     }
@@ -227,13 +227,13 @@ window.ToystallerPlatforms = window.ToystallerPlatforms || {};
         },
 
         getActiveModal() {
-            const dialogs = document.querySelectorAll('[role="dialog"], [aria-modal="true"], div[data-pagelet="MediaViewer"], div.layerContainer');
+            const dialogs = document.querySelectorAll('[role="dialog"], [aria-modal="true"], div[data-pagelet="MediaViewer"]');
             for (const d of dialogs) {
                 if (d.isConnected) {
                     const style = window.getComputedStyle(d);
                     if (style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0') {
                         const rect = d.getBoundingClientRect();
-                        if (rect.width > 60 && rect.height > 60) {
+                        if (rect.width > 80 && rect.height > 80) {
                             return d;
                         }
                     }
@@ -244,10 +244,10 @@ window.ToystallerPlatforms = window.ToystallerPlatforms || {};
 
         isInsideModal(media) {
             if (!media) return false;
-            const modal = media.closest('[role="dialog"], [aria-modal="true"], div[data-pagelet="MediaViewer"], div.layerContainer');
+            const modal = media.closest('[role="dialog"], [aria-modal="true"], div[data-pagelet="MediaViewer"]');
             if (modal) return true;
 
-            const dialogs = document.querySelectorAll('[role="dialog"], [aria-modal="true"], div[data-pagelet="MediaViewer"], div.layerContainer');
+            const dialogs = document.querySelectorAll('[role="dialog"], [aria-modal="true"], div[data-pagelet="MediaViewer"]');
             for (const d of dialogs) {
                 if (d.contains(media)) return true;
             }
@@ -362,6 +362,23 @@ window.ToystallerPlatforms = window.ToystallerPlatforms || {};
                 return true;
             }
 
+            // Exclude composer dialogs, Share modals, sticker pickers, and non-theater dialogs:
+            const dialog = media.closest('[role="dialog"], [aria-modal="true"]');
+            if (dialog) {
+                const isTheater = dialog.getAttribute('data-pagelet') === 'MediaViewer' || 
+                                  dialog.querySelector('div[data-pagelet="MediaViewer"]') ||
+                                  dialog.getAttribute('aria-label') === 'Media viewer' ||
+                                  dialog.querySelector('a[href*="/reel"], a[href*="/reels"], div[data-pagelet*="Reel"]');
+                if (!isTheater) {
+                    return true;
+                }
+            }
+
+            // Exclude Share dialogs, post creation, comments, forms
+            if (media.closest('[aria-label*="Share" i], [aria-label*="Create a post" i], [aria-label*="Edit post" i], form, [role="form"]')) {
+                return true;
+            }
+
             // Exclude completely hidden or zero-size elements
             if (section === 'friends') {
                 if (rect.width < 32 || rect.height < 32) return true;
@@ -374,6 +391,19 @@ window.ToystallerPlatforms = window.ToystallerPlatforms || {};
             // IMAGE FILTERING
             // ==========================================
             if (tagName === 'img' || tagName === 'image') {
+                // If this image is inside a video container that has a real visible <video>,
+                // the <video> owns the buttons! Skip the poster image to prevent duplicate/overlapping buttons!
+                const container = media.closest('div[role="article"], div[data-pagelet*="FeedUnit"], div[data-pagelet*="Reel"], div.x1y1aw1k') || media.parentElement;
+                if (container) {
+                    const v = container.querySelector('video');
+                    if (v && v.isConnected) {
+                        const vRect = v.getBoundingClientRect();
+                        if (vRect.width >= 100 && vRect.height >= 80) {
+                            return true;
+                        }
+                    }
+                }
+
                 const src = (media.currentSrc || media.src || media.getAttribute('xlink:href') || media.getAttribute('href') || '').toLowerCase();
 
                 // Exclude Facebook internal static assets, emoji sprite sheets, reaction icons
@@ -490,6 +520,19 @@ window.ToystallerPlatforms = window.ToystallerPlatforms || {};
             // VIDEO FILTERING
             // ==========================================
             if (tagName === 'video') {
+                // Check if video is just background music for a photo post / collage:
+                const article = media.closest('div[role="article"]');
+                if (article) {
+                    const photos = article.querySelectorAll('img:not([aria-hidden="true"])');
+                    if (photos.length >= 1) {
+                        const hasVisibleTrack = (media.videoWidth > 0 && media.videoHeight > 0);
+                        const isMusicWidget = media.closest('[aria-label*="music" i], [aria-label*="song" i], [aria-label*="audio" i], div.x1n2onr6');
+                        if (!hasVisibleTrack || rect.width < 120 || rect.height < 120 || isMusicWidget) {
+                            return true; // Exclude background song video!
+                        }
+                    }
+                }
+
                 // MODAL STATE
                 if (section === 'modal') {
                     if (!this.isInsideModal(media)) return true;

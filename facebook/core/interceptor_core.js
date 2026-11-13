@@ -20,6 +20,7 @@
         let videoId = null;
         let vencodeTag = '';
         let bitrate = 0;
+        let isAudioHint = false;
         try {
             const m = url.match(/[?&]efg=([^&]+)/);
             if (m) {
@@ -30,12 +31,14 @@
                     if (decoded.video_id) videoId = String(decoded.video_id).trim();
                     if (decoded.vencode_tag) vencodeTag = String(decoded.vencode_tag).toLowerCase();
                     if (decoded.bitrate) bitrate = Number(decoded.bitrate) || 0;
+                    if (decoded.audio_channel_count || decoded.audio_bitrate || decoded.is_audio) isAudioHint = true;
                 }
             }
         } catch(e) {}
 
         const lower = url.toLowerCase();
-        const isAudio = vencodeTag.includes('audio') || 
+        const isAudio = isAudioHint ||
+                        vencodeTag.includes('audio') || 
                         vencodeTag.includes('dash_a') || 
                         lower.includes('dash_audio') || 
                         lower.includes('_audio_') || 
@@ -216,8 +219,8 @@
             const doc = parser.parseFromString(xml, 'application/xml');
             const adaptationSets = doc.querySelectorAll('AdaptationSet');
             for (const adSet of adaptationSets) {
-                const mime = (adSet.getAttribute('mimeType') || adSet.getAttribute('contentType') || '').toLowerCase();
-                const isAudio = mime.includes('audio');
+                const adMime = (adSet.getAttribute('mimeType') || adSet.getAttribute('contentType') || '').toLowerCase();
+                const adIsAudio = adMime.includes('audio');
 
                 const reps = adSet.querySelectorAll('Representation');
                 for (const rep of reps) {
@@ -232,6 +235,16 @@
                     const height = parseInt(rep.getAttribute('height') || '0', 10);
                     const bandwidth = parseInt(rep.getAttribute('bandwidth') || '0', 10);
                     const qualityLabel = rep.getAttribute('FBQualityLabel') || '';
+                    const repMime = (rep.getAttribute('mimeType') || adMime).toLowerCase();
+                    const codecs = (rep.getAttribute('codecs') || '').toLowerCase();
+
+                    const isAudio = adIsAudio || 
+                                    repMime.includes('audio') || 
+                                    codecs.includes('mp4a') || 
+                                    codecs.includes('opus') || 
+                                    clean.includes('dash_audio') || 
+                                    clean.includes('_audio_') ||
+                                    (width === 0 && height === 0 && !qualityLabel && bandwidth < 320000);
 
                     if (isAudio) {
                         audioReps.push({ url: clean, bandwidth });
@@ -251,7 +264,6 @@
                 const clean = cleanVideoUrl(baseMatch[1]);
                 if (!clean) continue;
 
-                const isAudio = attrs.includes('audio') || clean.includes('dash_audio') || clean.includes('_audio_');
                 const wMatch = attrs.match(/width="(\d+)"/i);
                 const hMatch = attrs.match(/height="(\d+)"/i);
                 const bMatch = attrs.match(/bandwidth="(\d+)"/i);
@@ -261,6 +273,13 @@
                 const height = hMatch ? parseInt(hMatch[1], 10) : 0;
                 const bandwidth = bMatch ? parseInt(bMatch[1], 10) : 0;
                 const qualityLabel = qMatch ? qMatch[1] : '';
+
+                const isAudio = attrs.includes('audio') || 
+                                attrs.includes('mp4a') || 
+                                attrs.includes('opus') || 
+                                clean.includes('dash_audio') || 
+                                clean.includes('_audio_') ||
+                                (width === 0 && height === 0 && !qualityLabel && bandwidth < 320000);
 
                 if (isAudio) {
                     audioReps.push({ url: clean, bandwidth });
@@ -576,6 +595,24 @@
                 if (parsedManifest.bestAudio) {
                     res.dashAudio = parsedManifest.bestAudio.url;
                     res.dashAudioBitrate = parsedManifest.bestAudio.bandwidth;
+                }
+            }
+        }
+
+        // yt-dlp progressive_urls format extraction (contains combined stereo audio)
+        const progList = (obj.videoDeliveryResponse && obj.videoDeliveryResponse.progressive_urls) ||
+                         (obj.videoDeliveryResponseFragment && obj.videoDeliveryResponseFragment.videoDeliveryResponseResult && obj.videoDeliveryResponseFragment.videoDeliveryResponseResult.progressive_urls) ||
+                         (obj.progressive_urls);
+        if (Array.isArray(progList)) {
+            for (const p of progList) {
+                if (p && p.progressive_url) {
+                    const cleanP = cleanVideoUrl(p.progressive_url);
+                    if (cleanP && isValidVideo(cleanP)) {
+                        const q = (p.metadata && p.metadata.quality ? p.metadata.quality.toLowerCase() : '');
+                        if (q.includes('hd') || !res.hd) {
+                            res.hd = cleanP;
+                        }
+                    }
                 }
             }
         }

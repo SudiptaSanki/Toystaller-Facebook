@@ -401,6 +401,9 @@ class OverlayManager {
         // Automatically purge any duplicate, foreign, or overlapping .magic-dl-overlay in the DOM
         // within 35px to prevent blurry / ghosted double-button rendering!
         const cRect = entry.container.getBoundingClientRect();
+        const cTop = parseInt(entry.container.style.top || '0', 10);
+        const cLeft = parseInt(entry.container.style.left || '0', 10);
+
         const allOverlays = document.querySelectorAll('.magic-dl-overlay');
         for (const ov of allOverlays) {
             if (ov === entry.container) continue;
@@ -409,9 +412,15 @@ class OverlayManager {
                 ov.remove();
                 continue;
             }
-            // Purge any duplicate overlay sitting at the exact same location
+            // Purge any duplicate overlay sitting at the exact same location (rendered or style coordinates)
+            const oTop = parseInt(ov.style.top || '0', 10);
+            const oLeft = parseInt(ov.style.left || '0', 10);
             const oRect = ov.getBoundingClientRect();
-            if (oRect.width > 0 && Math.abs(oRect.top - cRect.top) < 35 && Math.abs(oRect.left - cRect.left) < 35) {
+
+            const isDuplicatePos = (cTop > 0 && Math.abs(oTop - cTop) < 35 && Math.abs(oLeft - cLeft) < 35) ||
+                                   (oRect.width > 0 && cRect.width > 0 && Math.abs(oRect.top - cRect.top) < 35 && Math.abs(oLeft - cLeft) < 35);
+
+            if (isDuplicatePos) {
                 ov.remove();
             }
         }
@@ -444,23 +453,65 @@ class OverlayManager {
         }, 250);
     }
 
+    _getMediaResolution(media) {
+        if (!media) return 0;
+        if (media.tagName.toLowerCase() === 'video') {
+            const w = media.videoWidth || media.offsetWidth || 0;
+            const h = media.videoHeight || media.offsetHeight || 0;
+            return w * h;
+        }
+        const w = media.naturalWidth || media.width || media.offsetWidth || 0;
+        const h = media.naturalHeight || media.height || media.offsetHeight || 0;
+        return w * h;
+    }
+
+    _rectsOverlap(r1, r2, threshold = 0.45) {
+        if (!r1 || !r2 || r1.width <= 0 || r1.height <= 0 || r2.width <= 0 || r2.height <= 0) return false;
+        const intersectL = Math.max(r1.left, r2.left);
+        const intersectT = Math.max(r1.top, r2.top);
+        const intersectR = Math.min(r1.right, r2.right);
+        const intersectB = Math.min(r1.bottom, r2.bottom);
+        const iW = Math.max(0, intersectR - intersectL);
+        const iH = Math.max(0, intersectB - intersectT);
+        const iArea = iW * iH;
+        const a1 = r1.width * r1.height;
+        const a2 = r2.width * r2.height;
+        return (iArea / a1 > threshold || iArea / a2 > threshold);
+    }
+
+    _destroyEntry(media) {
+        const entry = this.overlays.get(media);
+        if (!entry) return;
+        if (entry.resizeObserver) entry.resizeObserver.disconnect();
+        if (entry.intersectionObserver) entry.intersectionObserver.disconnect();
+        if (entry.container && entry.container.parentNode) {
+            entry.container.remove();
+        }
+        if (this.activeEntry === entry) this.activeEntry = null;
+        this.overlays.delete(media);
+    }
+
     hasOverlay(media) {
         if (!media) return false;
         if (this.overlays.has(media)) return true;
         const mediaTag = media.tagName.toLowerCase();
         const hoverHost = this._findHoverHost(media);
+        const mRect = media.getBoundingClientRect();
+
         for (const [existingMedia, existingEntry] of this.overlays.entries()) {
             if (existingMedia === media) return true;
             const existingTag = existingMedia.tagName.toLowerCase();
 
-            // NEVER let a background <video> (e.g. music playing for photos) suppress an <img>!
-            if (mediaTag !== existingTag) {
-                continue;
+            // If existing is a visible video and new is an img in the same space, existing video wins!
+            if (existingTag === 'video' && mediaTag !== 'video') {
+                const eRect = existingMedia.getBoundingClientRect();
+                if (eRect.width >= 100 && this._rectsOverlap(mRect, eRect, 0.4)) {
+                    return true;
+                }
             }
 
             if (hoverHost && existingEntry.hoverHost && hoverHost === existingEntry.hoverHost && hoverHost !== media && hoverHost !== existingMedia) {
                 // If it's a shared parent in a collage or grid, only treat as duplicate if bounding boxes overlap
-                const mRect = media.getBoundingClientRect();
                 const eRect = existingMedia.getBoundingClientRect();
                 if (Math.abs(mRect.top - eRect.top) < 20 && Math.abs(mRect.left - eRect.left) < 20) {
                     return true;
@@ -481,15 +532,28 @@ class OverlayManager {
         for (const [existingMedia, existingEntry] of this.overlays.entries()) {
             if (existingMedia === media) return;
 
+            // If one is video and one is img, video ALWAYS wins!
+            const isThisVideo = media.tagName.toLowerCase() === 'video';
+            const isExistingVideo = existingMedia.tagName.toLowerCase() === 'video';
+            if (!isThisVideo && isExistingVideo) {
+                const eRect = existingMedia.getBoundingClientRect();
+                if (eRect.width >= 100 && this._rectsOverlap(mRect, eRect, 0.4)) {
+                    return; // Video already has overlay!
+                }
+            } else if (isThisVideo && !isExistingVideo) {
+                const eRect = existingMedia.getBoundingClientRect();
+                if (this._rectsOverlap(mRect, eRect, 0.4)) {
+                    this._destroyEntry(existingMedia);
+                    break;
+                }
+            }
+
             // 1. Shared hoverHost tile deduplication (e.g. blur placeholder + sharp photo inside same tile)
             if (hoverHost && existingEntry.hoverHost && hoverHost === existingEntry.hoverHost) {
-                const mRes = (media.naturalWidth || 0) * (media.naturalHeight || 0);
-                const eRes = (existingMedia.naturalWidth || 0) * (existingMedia.naturalHeight || 0);
+                const mRes = this._getMediaResolution(media);
+                const eRes = this._getMediaResolution(existingMedia);
                 if (mRes > eRes && mRes > 20000) {
-                    existingEntry.container.remove();
-                    if (existingEntry.resizeObserver) existingEntry.resizeObserver.disconnect();
-                    if (existingEntry.intersectionObserver) existingEntry.intersectionObserver.disconnect();
-                    this.overlays.delete(existingMedia);
+                    this._destroyEntry(existingMedia);
                     break;
                 } else {
                     return; // Existing overlay is already on the tile!
@@ -504,24 +568,11 @@ class OverlayManager {
             // 3. Spatial bounding box overlap deduplication
             if (mRect.width > 0 && mRect.height > 0) {
                 const eRect = existingMedia.getBoundingClientRect();
-                const intersectL = Math.max(mRect.left, eRect.left);
-                const intersectT = Math.max(mRect.top, eRect.top);
-                const intersectR = Math.min(mRect.right, eRect.right);
-                const intersectB = Math.min(mRect.bottom, eRect.bottom);
-                const iW = Math.max(0, intersectR - intersectL);
-                const iH = Math.max(0, intersectB - intersectT);
-                const iArea = iW * iH;
-                const mArea = mRect.width * mRect.height;
-                const eArea = eRect.width * eRect.height;
-
-                if (mArea > 0 && eArea > 0 && (iArea / mArea > 0.55 || iArea / eArea > 0.55)) {
-                    const mRes = (media.naturalWidth || 0) * (media.naturalHeight || 0);
-                    const eRes = (existingMedia.naturalWidth || 0) * (existingMedia.naturalHeight || 0);
+                if (this._rectsOverlap(mRect, eRect, 0.5)) {
+                    const mRes = this._getMediaResolution(media);
+                    const eRes = this._getMediaResolution(existingMedia);
                     if (mRes > eRes) {
-                        existingEntry.container.remove();
-                        if (existingEntry.resizeObserver) existingEntry.resizeObserver.disconnect();
-                        if (existingEntry.intersectionObserver) existingEntry.intersectionObserver.disconnect();
-                        this.overlays.delete(existingMedia);
+                        this._destroyEntry(existingMedia);
                         break;
                     } else {
                         return;
@@ -875,6 +926,33 @@ class OverlayManager {
         }
 
         const rect = media.getBoundingClientRect();
+
+        // Real-time spatial deduplication during position updates:
+        if (rect.width > 0 && rect.height > 0) {
+            for (const [otherMedia, otherEntry] of this.overlays.entries()) {
+                if (otherMedia === media) continue;
+                const otherRect = otherMedia.getBoundingClientRect();
+                if (this._rectsOverlap(rect, otherRect, 0.45)) {
+                    const isThisVideo = media.tagName.toLowerCase() === 'video';
+                    const isOtherVideo = otherMedia.tagName.toLowerCase() === 'video';
+                    if (isThisVideo && !isOtherVideo) {
+                        this._destroyEntry(otherMedia);
+                    } else if (!isThisVideo && isOtherVideo) {
+                        this._destroyEntry(media);
+                        return;
+                    } else {
+                        const resThis = this._getMediaResolution(media);
+                        const resOther = this._getMediaResolution(otherMedia);
+                        if (resThis < resOther) {
+                            this._destroyEntry(media);
+                            return;
+                        } else {
+                            this._destroyEntry(otherMedia);
+                        }
+                    }
+                }
+            }
+        }
         const style = window.getComputedStyle(media);
         const isStyleHidden = style.opacity === '0' || style.visibility === 'hidden' || style.display === 'none';
 

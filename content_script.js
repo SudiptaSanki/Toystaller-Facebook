@@ -71,44 +71,82 @@ function bootToystaller() {
     `;
     document.documentElement.appendChild(banner);
 
-    // Unmute and play native video so Facebook DASH downloads the audio stream!
-    const unmuteAndPlay = () => {
+    // Unmute and play ONLY the target Reel video! Strictly mute and pause all other videos to prevent multi-video noise!
+    const unmuteTargetVideoOnly = () => {
+        const targetVideo = document.querySelector('div[data-pagelet*="Reel"] video, [role="main"] video, div.x1y1aw1k video, video');
         document.querySelectorAll('video').forEach(v => {
-            try { 
-                v.muted = false; 
-                v.volume = 1.0; 
-                if (v.paused) v.play().catch(() => {}); 
-            } catch(e) {}
-        });
-        const soundBtns = document.querySelectorAll(
-            '[aria-label*="unmute" i], [aria-label*="Unmute" i], ' +
-            '[aria-label*="Turn on sound" i], [aria-label*="sound" i], ' +
-            '[aria-label*="volume" i]'
-        );
-        soundBtns.forEach(b => {
-            const label = (b.getAttribute('aria-label') || '').toLowerCase();
-            if (label.includes('unmute') || label.includes('turn on') || b.getAttribute('aria-pressed') === 'false') {
-                try { b.click(); } catch(e) {}
+            if (v !== targetVideo) {
+                try { v.muted = true; v.pause(); } catch(e) {}
             }
         });
+
+        if (targetVideo) {
+            try { 
+                targetVideo.muted = false; 
+                targetVideo.volume = 1.0; 
+                if (targetVideo.paused) targetVideo.play().catch(() => {}); 
+            } catch(e) {}
+
+            const container = targetVideo.closest('div[data-pagelet*="Reel"], [role="main"], div.x1y1aw1k') || targetVideo.parentElement;
+            if (container) {
+                const soundBtn = container.querySelector(
+                    '[aria-label*="unmute" i], [aria-label*="Turn on sound" i], [aria-label*="sound" i]'
+                );
+                if (soundBtn) {
+                    const label = (soundBtn.getAttribute('aria-label') || '').toLowerCase();
+                    if (label.includes('unmute') || label.includes('turn on') || soundBtn.getAttribute('aria-pressed') === 'false') {
+                        try { soundBtn.click(); } catch(e) {}
+                    }
+                }
+            }
+        }
+        return targetVideo;
     };
-    unmuteAndPlay();
-    const playInterval = setInterval(unmuteAndPlay, 300);
+
+    unmuteTargetVideoOnly();
+    const delayTimer = setTimeout(unmuteTargetVideoOnly, 500);
 
     let attempts = 0;
+    const maxAttempts = 6;
+    let done = false;
+
+    const finish = (videoUrl, audioUrl, videoId) => {
+        if (done) return;
+        done = true;
+        clearTimeout(delayTimer);
+        banner.innerHTML = `<span>Ready! Opening Player...</span>`;
+        chrome.runtime.sendMessage({
+            action: 'autoExtractDone',
+            url: videoUrl,
+            audioUrl: audioUrl || null,
+            fbUrl: window.location.href.split('?')[0],
+            videoId: videoId || ''
+        });
+    };
+
     const pollForStream = () => {
+        if (done) return;
         attempts++;
-        const video = document.querySelector('video');
-        if (!video && attempts < 30) {
-            setTimeout(pollForStream, 200);
-            return;
-        }
+        const targetVideo = unmuteTargetVideoOnly();
+        const reelIdMatch = window.location.pathname.match(/\/reel\/(\d+)/);
+        const urlReelId = reelIdMatch ? reelIdMatch[1] : null;
 
         const platform = PlatformManager.getPlatform();
-        const currentId = platform.extractVideoId ? platform.extractVideoId(video) : null;
+        const currentId = urlReelId || (platform.extractVideoId ? platform.extractVideoId(targetVideo) : null);
+
+        // In parallel, also query fetchMasterProgressiveUrl for instant extraction
+        if (currentId && attempts === 1) {
+            fetchMasterProgressiveUrl(currentId).then(res => {
+                if (res && res.url && isValidVideoUrl(res.url)) {
+                    if (res.audioUrl || res.isMasterProgressive) {
+                        finish(res.url, res.audioUrl, currentId);
+                    }
+                }
+            }).catch(() => {});
+        }
 
         const magicId = Math.random().toString(36).substring(2, 15);
-        if (video) video.setAttribute('data-toystaller-active', magicId);
+        if (targetVideo) targetVideo.setAttribute('data-toystaller-active', magicId);
 
         let resolved = false;
         const handler = (e) => {
@@ -119,34 +157,30 @@ function bootToystaller() {
 
             const videoUrl = cleanVideoUrl(e.data.url);
             const audioUrl = cleanVideoUrl(e.data.audioUrl);
-            const isMasterProg = isProgressiveStream(videoUrl);
+            const isMasterProg = e.data.isMasterProgressive || isProgressiveStream(videoUrl);
             const hasSound = !!audioUrl || isMasterProg;
 
             if (videoUrl && isValidVideoUrl(videoUrl) && hasSound) {
-                clearInterval(playInterval);
-                banner.innerHTML = `<span>Ready! Opening Player with Sound...</span>`;
-                chrome.runtime.sendMessage({
-                    action: 'autoExtractDone',
-                    url: videoUrl,
-                    audioUrl: audioUrl,
-                    fbUrl: window.location.href.split('?')[0],
-                    videoId: currentId || ''
-                });
-            } else if (attempts < 25) {
-                // Sound still loading or Facebook player unmute in progress, retry!
-                unmuteAndPlay();
-                setTimeout(pollForStream, 350);
+                finish(videoUrl, audioUrl, currentId);
+            } else if (attempts < maxAttempts) {
+                setTimeout(pollForStream, 300);
             } else if (videoUrl && isValidVideoUrl(videoUrl)) {
-                // Exhausted all attempts, open best available
-                clearInterval(playInterval);
-                banner.innerHTML = `<span>Ready! Opening Player...</span>`;
-                chrome.runtime.sendMessage({
-                    action: 'autoExtractDone',
-                    url: videoUrl,
-                    audioUrl: audioUrl,
-                    fbUrl: window.location.href.split('?')[0],
-                    videoId: currentId || ''
-                });
+                if (currentId && !audioUrl) {
+                    fetchMasterProgressiveUrl(currentId).then(res => {
+                        const bestAudio = (res && res.audioUrl) ? res.audioUrl : null;
+                        finish(videoUrl, bestAudio, currentId);
+                    }).catch(() => {
+                        finish(videoUrl, null, currentId);
+                    });
+                } else {
+                    finish(videoUrl, audioUrl, currentId);
+                }
+            } else if (currentId) {
+                fetchMasterProgressiveUrl(currentId).then(res => {
+                    if (res && res.url && isValidVideoUrl(res.url)) {
+                        finish(res.url, res.audioUrl, currentId);
+                    }
+                }).catch(() => {});
             }
         };
 
@@ -157,14 +191,14 @@ function bootToystaller() {
             if (!resolved) {
                 resolved = true;
                 window.removeEventListener('message', handler);
-                if (attempts < 30) {
-                    setTimeout(pollForStream, 350);
+                if (!done && attempts < maxAttempts) {
+                    setTimeout(pollForStream, 300);
                 }
             }
-        }, 500);
+        }, 400);
     };
 
-    setTimeout(pollForStream, 500);
+    setTimeout(pollForStream, 300);
 })();
 
 const pageInterceptedVideoUrls = new Set();
@@ -269,6 +303,7 @@ function parseStreamMetadata(url) {
     let videoId = null;
     let vencodeTag = '';
     let bitrate = 0;
+    let isAudioHint = false;
     try {
         const m = url.match(/[?&]efg=([^&]+)/);
         if (m) {
@@ -279,22 +314,25 @@ function parseStreamMetadata(url) {
                 if (decoded.video_id) videoId = String(decoded.video_id).trim();
                 if (decoded.vencode_tag) vencodeTag = String(decoded.vencode_tag).toLowerCase();
                 if (decoded.bitrate) bitrate = Number(decoded.bitrate) || 0;
+                if (decoded.audio_channel_count || decoded.audio_bitrate || decoded.is_audio) isAudioHint = true;
             }
         }
     } catch(e) {}
 
     const lower = url.toLowerCase();
-    const isAudio = vencodeTag.includes('audio') || 
+    const isAudio = isAudioHint ||
+                    vencodeTag.includes('audio') || 
                     vencodeTag.includes('dash_a') || 
                     lower.includes('dash_audio') || 
                     lower.includes('_audio_') || 
-                    (bitrate > 0 && bitrate < 200000 && !vencodeTag.includes('baseline') && !vencodeTag.includes('video'));
+                    lower.includes('mime=audio') ||
+                    (bitrate > 0 && bitrate < 220000 && !vencodeTag.includes('baseline') && !vencodeTag.includes('video'));
 
     const isVideo = !isAudio && (
         vencodeTag.includes('baseline') || 
         vencodeTag.includes('video') || 
         vencodeTag.includes('dash_v') || 
-        bitrate >= 200000 || 
+        bitrate >= 220000 || 
         lower.includes('.mp4') || 
         lower.includes('.m4v')
     );
@@ -334,8 +372,8 @@ function parseDashManifestXml(manifestXml) {
         const doc = parser.parseFromString(xml, 'application/xml');
         const adaptationSets = doc.querySelectorAll('AdaptationSet');
         for (const adSet of adaptationSets) {
-            const mime = (adSet.getAttribute('mimeType') || adSet.getAttribute('contentType') || '').toLowerCase();
-            const isAudio = mime.includes('audio');
+            const adMime = (adSet.getAttribute('mimeType') || adSet.getAttribute('contentType') || '').toLowerCase();
+            const adIsAudio = adMime.includes('audio');
 
             const reps = adSet.querySelectorAll('Representation');
             for (const rep of reps) {
@@ -350,6 +388,16 @@ function parseDashManifestXml(manifestXml) {
                 const height = parseInt(rep.getAttribute('height') || '0', 10);
                 const bandwidth = parseInt(rep.getAttribute('bandwidth') || '0', 10);
                 const qualityLabel = rep.getAttribute('FBQualityLabel') || '';
+                const repMime = (rep.getAttribute('mimeType') || adMime).toLowerCase();
+                const codecs = (rep.getAttribute('codecs') || '').toLowerCase();
+
+                const isAudio = adIsAudio || 
+                                repMime.includes('audio') || 
+                                codecs.includes('mp4a') || 
+                                codecs.includes('opus') || 
+                                clean.includes('dash_audio') || 
+                                clean.includes('_audio_') ||
+                                (width === 0 && height === 0 && !qualityLabel && bandwidth < 320000);
 
                 if (isAudio) {
                     audioReps.push({ url: clean, bandwidth });
@@ -369,7 +417,6 @@ function parseDashManifestXml(manifestXml) {
             const clean = cleanVideoUrl(baseMatch[1]);
             if (!clean) continue;
 
-            const isAudio = attrs.includes('audio') || clean.includes('dash_audio') || clean.includes('_audio_');
             const wMatch = attrs.match(/width="(\d+)"/i);
             const hMatch = attrs.match(/height="(\d+)"/i);
             const bMatch = attrs.match(/bandwidth="(\d+)"/i);
@@ -379,6 +426,13 @@ function parseDashManifestXml(manifestXml) {
             const height = hMatch ? parseInt(hMatch[1], 10) : 0;
             const bandwidth = bMatch ? parseInt(bMatch[1], 10) : 0;
             const qualityLabel = qMatch ? qMatch[1] : '';
+
+            const isAudio = attrs.includes('audio') || 
+                            attrs.includes('mp4a') || 
+                            attrs.includes('opus') || 
+                            clean.includes('dash_audio') || 
+                            clean.includes('_audio_') ||
+                            (width === 0 && height === 0 && !qualityLabel && bandwidth < 320000);
 
             if (isAudio) {
                 audioReps.push({ url: clean, bandwidth });
@@ -410,85 +464,115 @@ async function fetchMasterProgressiveUrl(videoId) {
                 'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
             }
         });
-        if (!resp.ok) return null;
-        const html = await resp.text();
+        if (resp.ok) {
+            const html = await resp.text();
 
-        // 1. DASH MPD Manifest parsing (yt-dlp Full HD 1080p / 2K format extraction)
-        const manifestRegex = /"(?:dash_manifest|dash_manifest_xml_string|manifest_xml)"\s*:\s*"([^"\\]*(?:\\.[^"\\]*)*)"/;
-        const manifestMatch = html.match(manifestRegex);
-        let dashRes = null;
-        if (manifestMatch && manifestMatch[1]) {
-            try {
-                const rawXml = JSON.parse('"' + manifestMatch[1] + '"');
-                dashRes = parseDashManifestXml(rawXml);
-            } catch(e) {}
+            // 1. DASH MPD Manifest parsing (yt-dlp Full HD 1080p / 2K format extraction)
+            const manifestRegex = /"(?:dash_manifest|dash_manifest_xml_string|manifest_xml)"\s*:\s*"([^"\\]*(?:\\.[^"\\]*)*)"/;
+            const manifestMatch = html.match(manifestRegex);
+            let dashRes = null;
+            if (manifestMatch && manifestMatch[1]) {
+                try {
+                    const rawXml = JSON.parse('"' + manifestMatch[1] + '"');
+                    dashRes = parseDashManifestXml(rawXml);
+                } catch(e) {}
+            }
+
+            // 2. High definition progressive master stream (audio + video combined)
+            let progHd = null;
+            const hdRegex = /"(?:playable_url_quality_hd|browser_native_hd_url)"\s*:\s*"([^"\\]*(?:\\.[^"\\]*)*)"/;
+            const hdMatch = html.match(hdRegex);
+            if (hdMatch && hdMatch[1]) {
+                try {
+                    const raw = JSON.parse('"' + hdMatch[1] + '"');
+                    const clean = cleanVideoUrl(raw);
+                    if (clean && isValidVideoUrl(clean)) {
+                        progHd = clean;
+                    }
+                } catch(e) {}
+            }
+
+            // Resolution comparison (yt-dlp bestvideo+bestaudio logic):
+            // If DASH provides Full HD (1080p) or 2K with companion audio:
+            if (dashRes && dashRes.bestVideo && dashRes.bestAudio) {
+                return {
+                    url: dashRes.bestVideo.url,
+                    audioUrl: dashRes.bestAudio.url,
+                    isMasterProgressive: false,
+                    quality: dashRes.bestVideo.qualityLabel || 'Full HD (1080p)'
+                };
+            }
+
+            // Else if progressive master HD exists:
+            if (progHd) {
+                return {
+                    url: progHd,
+                    audioUrl: dashRes && dashRes.bestAudio ? dashRes.bestAudio.url : null,
+                    isMasterProgressive: true,
+                    quality: 'Master HD'
+                };
+            }
+
+            // Else if any DASH video exists:
+            if (dashRes && dashRes.bestVideo) {
+                return {
+                    url: dashRes.bestVideo.url,
+                    audioUrl: dashRes.bestAudio ? dashRes.bestAudio.url : null,
+                    isMasterProgressive: false,
+                    quality: dashRes.bestVideo.qualityLabel || 'HD Video'
+                };
+            }
+
+            // 3. Fallback to standard definition
+            const sdRegex = /"(?:playable_url|browser_native_sd_url)"\s*:\s*"([^"\\]*(?:\\.[^"\\]*)*)"/;
+            const sdMatch = html.match(sdRegex);
+            if (sdMatch && sdMatch[1]) {
+                try {
+                    const raw = JSON.parse('"' + sdMatch[1] + '"');
+                    const clean = cleanVideoUrl(raw);
+                    if (clean && isValidVideoUrl(clean)) {
+                        return {
+                            url: clean,
+                            audioUrl: null,
+                            isMasterProgressive: true,
+                            quality: 'SD MP4'
+                        };
+                    }
+                } catch(e) {}
+            }
         }
+    } catch(e) {
+        console.warn('[Toystaller] fetchMasterProgressiveUrl error:', e);
+    }
 
-        // 2. High definition progressive master stream (audio + video combined)
-        let progHd = null;
-        const hdRegex = /"(?:playable_url_quality_hd|browser_native_hd_url)"\s*:\s*"([^"\\]*(?:\\.[^"\\]*)*)"/;
-        const hdMatch = html.match(hdRegex);
-        if (hdMatch && hdMatch[1]) {
-            try {
+    // 4. yt-dlp Mobile Web fallback (progressive formats with integrated audio)
+    try {
+        const mUrl = `https://m.facebook.com/watch/?v=${videoId}&_rdr`;
+        const mResp = await fetch(mUrl, {
+            method: 'GET',
+            credentials: 'include',
+            headers: {
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
+            }
+        });
+        if (mResp.ok) {
+            const mHtml = await mResp.text();
+            const hdMatch = mHtml.match(/"(?:playable_url_quality_hd|browser_native_hd_url)"\s*:\s*"([^"\\]*(?:\\.[^"\\]*)*)"/);
+            if (hdMatch && hdMatch[1]) {
                 const raw = JSON.parse('"' + hdMatch[1] + '"');
-                const clean = cleanVideoUrl(raw);
-                if (clean && isValidVideoUrl(clean)) {
-                    progHd = clean;
-                }
-            } catch(e) {}
-        }
-
-        // Resolution comparison (yt-dlp bestvideo+bestaudio logic):
-        // If DASH provides 1080p (pixels >= 1080*1920) or 2K, and audio exists:
-        if (dashRes && dashRes.bestVideo && dashRes.bestVideo.pixels >= 1920 * 1080 && dashRes.bestAudio) {
-            return {
-                url: dashRes.bestVideo.url,
-                audioUrl: dashRes.bestAudio.url,
-                isMasterProgressive: false,
-                quality: dashRes.bestVideo.qualityLabel || 'Full HD (1080p)'
-            };
-        }
-
-        // Else if progressive master HD exists:
-        if (progHd) {
-            return {
-                url: progHd,
-                audioUrl: dashRes && dashRes.bestAudio ? dashRes.bestAudio.url : null,
-                isMasterProgressive: true,
-                quality: 'Master HD (720p)'
-            };
-        }
-
-        // Else if any DASH video exists:
-        if (dashRes && dashRes.bestVideo) {
-            return {
-                url: dashRes.bestVideo.url,
-                audioUrl: dashRes.bestAudio ? dashRes.bestAudio.url : null,
-                isMasterProgressive: false,
-                quality: dashRes.bestVideo.qualityLabel || 'HD Video'
-            };
-        }
-
-        // 3. Fallback to standard definition ONLY if no HD / DASH streams exist anywhere
-        const sdRegex = /"(?:playable_url|browser_native_sd_url)"\s*:\s*"([^"\\]*(?:\\.[^"\\]*)*)"/;
-        const sdMatch = html.match(sdRegex);
-        if (sdMatch && sdMatch[1]) {
-            try {
-                const raw = JSON.parse('"' + sdMatch[1] + '"');
                 const clean = cleanVideoUrl(raw);
                 if (clean && isValidVideoUrl(clean)) {
                     return {
                         url: clean,
                         audioUrl: null,
                         isMasterProgressive: true,
-                        quality: 'SD MP4'
+                        quality: 'Full HD Progressive'
                     };
                 }
-            } catch(e) {}
+            }
         }
-    } catch(e) {
-        console.warn('[Toystaller] fetchMasterProgressiveUrl error:', e);
-    }
+    } catch(e) {}
+
     return null;
 }
 
@@ -865,14 +949,26 @@ function injectDownloadButtons() {
                                 return;
                             }
 
-                            // If we have video but no audio, and an associated video ID exists, upgrade using yt-dlp format resolution logic
+                            // If we have video but audio is missing, give Facebook DASH 2 retry cycles (600ms)
+                            // to fetch audio chunks after unmuting before making external requests:
+                            if (url && isValidVideoUrl(url) && !audioUrl && !isMasterProgressive && attempts < 3) {
+                                console.log(`[Toystaller] Video resolved, waiting for audio chunk (attempt ${attempts}/3)...`);
+                                ensureFacebookSoundOn(media);
+                                setTimeout(tryExtract, 300);
+                                return;
+                            }
+
+                            // If audio still missing on attempt >= 3, use yt-dlp format resolution logic
                             if (url && isValidVideoUrl(url) && targetVideoId && !isMasterProgressive && !audioUrl) {
                                 fetchMasterProgressiveUrl(targetVideoId).then(res => {
                                     openBtn.style.opacity = '1';
                                     openBtn.style.pointerEvents = 'auto';
                                     if (res && res.url && isValidVideoUrl(res.url)) {
-                                        // DO NOT downgrade a 1080p stream to 360p SD:
-                                        if (res.quality === 'SD MP4' && (url.includes('1080') || url.includes('/v/t64.') || !url.includes('sd_src'))) {
+                                        // NEVER downgrade a 1080p stream to 360p SD:
+                                        const meta = parseStreamMetadata(url);
+                                        if (res.quality === 'SD MP4' && (url.includes('1080') || (meta && meta.bitrate > 1000000))) {
+                                            openVideo(url, res.audioUrl, targetVideoId);
+                                        } else if (res.audioUrl) {
                                             openVideo(url, res.audioUrl, targetVideoId);
                                         } else {
                                             openVideo(res.url, res.audioUrl, targetVideoId);
@@ -889,9 +985,9 @@ function injectDownloadButtons() {
                             }
 
                             if (attempts < maxAttempts) {
-                                console.log(`[Toystaller] Stream buffering (attempt ${attempts}/${maxAttempts}), retrying in 350ms...`);
+                                console.log(`[Toystaller] Stream buffering (attempt ${attempts}/${maxAttempts}), retrying in 300ms...`);
                                 ensureFacebookSoundOn(media);
-                                setTimeout(tryExtract, 350);
+                                setTimeout(tryExtract, 300);
                             } else {
                                 openBtn.style.opacity = '1';
                                 openBtn.style.pointerEvents = 'auto';
@@ -922,7 +1018,7 @@ function injectDownloadButtons() {
                 const imgBtn = document.createElement('button');
                 imgBtn.className = 'magic-img-btn';
                 imgBtn.title = isVideo ? 'Open thumbnail in new tab' : 'Open photo in new tab';
-                imgBtn.innerHTML = `<svg width="${iconSize}" height="${iconSize}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path><polyline points="15 3 21 3 21 9"></polyline><line x1="10" y1="14" x2="21" y2="3"></line></svg>`;
+                imgBtn.innerHTML = `<svg width="${iconSize}" height="${iconSize}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect><circle cx="8.5" cy="8.5" r="1.5"></circle><polyline points="21 15 16 10 5 21"></polyline></svg>`;
                 imgBtn.style.cssText = makeBtnStyle('rgba(30, 30, 30, 0.75)');
 
                 imgBtn.addEventListener('mouseenter', () => {
