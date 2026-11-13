@@ -91,6 +91,40 @@
     .btn-secondary:hover {
       background: rgba(255, 255, 255, 0.15);
     }
+    .btn-repair {
+      background: rgba(24, 119, 242, 0.16);
+      color: #4facfe;
+      border: 1px solid rgba(24, 119, 242, 0.4);
+    }
+    .btn-repair:hover {
+      background: rgba(24, 119, 242, 0.3);
+      color: #fff;
+      transform: translateY(-1px);
+    }
+    .tip-box {
+      margin-top: 16px;
+      max-width: 680px;
+      background: rgba(255, 255, 255, 0.04);
+      border: 1px solid rgba(255, 255, 255, 0.09);
+      border-left: 3px solid #1877f2;
+      border-radius: 8px;
+      padding: 10px 16px;
+      display: flex;
+      align-items: flex-start;
+      gap: 12px;
+      font-size: 12.5px;
+      color: #b0b3b8;
+      line-height: 1.5;
+    }
+    .tip-box strong {
+      color: #e4e6eb;
+      display: block;
+      margin-bottom: 2px;
+    }
+    .tip-icon {
+      font-size: 16px;
+      line-height: 1;
+    }
     .player-container {
       margin-top: 56px;
       padding: 20px 24px 30px;
@@ -212,6 +246,10 @@
         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 18V5l12-2v13"></path><circle cx="6" cy="18" r="3"></circle><circle cx="18" cy="16" r="3"></circle></svg>
         Download Audio
       </button>
+      <button id="repairBtn" class="btn btn-repair" style="display: none;" title="Reload Reel with sound on to extract full master video + audio">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 5L6 9H2v6h4l5 4V5z"></path><path d="M19.07 4.93a10 10 0 0 1 0 14.14M15.54 8.46a5 5 0 0 1 0 7.07"></path></svg>
+        <span>Reload with Sound</span>
+      </button>
       <button id="copyBtn" class="btn btn-secondary">
         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
         Copy Link
@@ -234,6 +272,13 @@
       <span class="info-pill" id="qualityPill">Original Quality</span>
       <span>•</span>
       <span id="audioStatusText">Synchronized Sound</span>
+    </div>
+    <div id="tipBox" class="tip-box" style="display: none;">
+      <div class="tip-icon">💡</div>
+      <div class="tip-content">
+        <strong>Sound Missing or Video Muted?</strong>
+        <span>Facebook often mutes Reels while scrolling in the feed, which can prevent the audio stream from loading until unmuted. If audio is missing, click <b>"Reload with Sound"</b> in the top right to automatically open the Reel with sound on and capture the complete Master HD progressive stream!</span>
+      </div>
     </div>
   </div>
 

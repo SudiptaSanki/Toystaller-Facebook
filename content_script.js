@@ -71,14 +71,22 @@ function bootToystaller() {
     `;
     document.documentElement.appendChild(banner);
 
-    // Mute and pause native video so user doesn't hear double audio
-    const silenceVideo = () => {
+    // Unmute and play native video so Facebook DASH downloads the audio stream!
+    const unmuteAndPlay = () => {
         document.querySelectorAll('video').forEach(v => {
-            try { v.muted = true; v.pause(); } catch(e) {}
+            try { 
+                v.muted = false; 
+                v.volume = 0.5; 
+                v.play().catch(() => {}); 
+            } catch(e) {}
+        });
+        const muteBtns = document.querySelectorAll('[aria-label*="Unmute" i], [aria-label*="unmute" i]');
+        muteBtns.forEach(b => {
+            try { b.click(); } catch(e) {}
         });
     };
-    silenceVideo();
-    setInterval(silenceVideo, 300);
+    unmuteAndPlay();
+    const playInterval = setInterval(unmuteAndPlay, 400);
 
     let attempts = 0;
     const pollForStream = () => {
@@ -106,11 +114,14 @@ function bootToystaller() {
             const audioUrl = cleanVideoUrl(e.data.audioUrl);
 
             if (videoUrl && isValidVideoUrl(videoUrl)) {
+                clearInterval(playInterval);
                 banner.innerHTML = `<span>Ready! Opening Player...</span>`;
                 chrome.runtime.sendMessage({
                     action: 'autoExtractDone',
                     url: videoUrl,
-                    audioUrl: audioUrl
+                    audioUrl: audioUrl,
+                    fbUrl: window.location.href.split('?')[0],
+                    videoId: currentId || ''
                 });
             } else if (attempts < 25) {
                 setTimeout(pollForStream, 300);
@@ -608,11 +619,20 @@ function injectDownloadButtons() {
                     }
 
                     // --- Video / Reel Extraction ---
-                    const openVideo = (url, audioUrl) => {
+                    const openVideo = (url, audioUrl, optVideoId) => {
                         const clean = cleanVideoUrl(url);
                         const cleanAudio = cleanVideoUrl(audioUrl);
+                        const vid = optVideoId || currentId || '';
+                        const targetFbUrl = vid ? `https://www.facebook.com/reel/${vid}/` : window.location.href.split('?')[0];
                         if (clean && isValidVideoUrl(clean)) {
-                            safeSendMessage({ action: 'openInNewTab', url: clean, audioUrl: cleanAudio, isVideo: true });
+                            safeSendMessage({ 
+                                action: 'openInNewTab', 
+                                url: clean, 
+                                audioUrl: cleanAudio, 
+                                fbUrl: targetFbUrl,
+                                videoId: vid,
+                                isVideo: true 
+                            });
                         } else {
                             alert('Could not find the HD video URL yet.\n\nTip: Make sure the video has started playing, then click the button again.');
                         }
@@ -650,7 +670,7 @@ function injectDownloadButtons() {
                                     audio: audioUrl,
                                     isMasterProgressive: isMasterProgressive
                                 });
-                                openVideo(url, audioUrl);
+                                openVideo(url, audioUrl, targetVideoId);
                                 return;
                             }
 
@@ -660,14 +680,14 @@ function injectDownloadButtons() {
                                     openBtn.style.opacity = '1';
                                     openBtn.style.pointerEvents = 'auto';
                                     if (masterUrl && isValidVideoUrl(masterUrl)) {
-                                        openVideo(masterUrl, null);
+                                        openVideo(masterUrl, null, targetVideoId);
                                     } else {
-                                        openVideo(url, null);
+                                        openVideo(url, null, targetVideoId);
                                     }
                                 }).catch(() => {
                                     openBtn.style.opacity = '1';
                                     openBtn.style.pointerEvents = 'auto';
-                                    openVideo(url, null);
+                                    openVideo(url, null, targetVideoId);
                                 });
                                 return;
                             }
@@ -683,7 +703,7 @@ function injectDownloadButtons() {
                                 openBtn.style.pointerEvents = 'auto';
 
                                 if (url && isValidVideoUrl(url)) {
-                                    openVideo(url, audioUrl);
+                                    openVideo(url, audioUrl, targetVideoId);
                                 } else if (targetVideoId) {
                                     const reelUrl = `https://www.facebook.com/reel/${targetVideoId}`;
                                     console.log(`[Toystaller] Launching seamless reload extraction for [${targetVideoId}]...`);

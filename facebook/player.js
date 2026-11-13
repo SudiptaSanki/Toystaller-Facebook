@@ -361,4 +361,25 @@
             }, 1800);
         });
     });
+
+    // Auto-fix / Reload with Sound
+    const fbUrl = params.get('fbUrl');
+    const videoId = params.get('videoId');
+    const repairBtn = document.getElementById('repairBtn');
+    const tipBox = document.getElementById('tipBox');
+
+    if ((fbUrl || videoId) && repairBtn) {
+        repairBtn.style.display = 'inline-flex';
+        if (tipBox) tipBox.style.display = 'flex';
+
+        repairBtn.addEventListener('click', () => {
+            const targetReelUrl = fbUrl || `https://www.facebook.com/reel/${videoId}/`;
+            showToast('Auto-reloading Reel with audio enabled to extract master stream...', 3500);
+            chrome.runtime.sendMessage({
+                action: 'autoReloadReelAndOpen',
+                reelUrl: targetReelUrl,
+                videoId: videoId
+            });
+        });
+    }
 })();

@@ -78,6 +78,8 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     } else if (request.action === 'openInNewTab') {
         const url = request.url || '';
         const audioUrl = request.audioUrl || '';
+        const fbUrl = request.fbUrl || '';
+        const videoId = request.videoId || '';
         const lowerUrl = url.toLowerCase();
         const isVideo = request.isVideo || 
                         lowerUrl.includes('.mp4') || 
@@ -92,6 +94,12 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             targetUrl = chrome.runtime.getURL('player.html') + '?url=' + encodeURIComponent(url);
             if (audioUrl) {
                 targetUrl += '&audio=' + encodeURIComponent(audioUrl);
+            }
+            if (fbUrl) {
+                targetUrl += '&fbUrl=' + encodeURIComponent(fbUrl);
+            }
+            if (videoId) {
+                targetUrl += '&videoId=' + encodeURIComponent(videoId);
             }
         }
         const tabProps = { url: targetUrl };
@@ -127,9 +135,17 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         const tabId = sender.tab ? sender.tab.id : null;
         const url = request.url;
         const audioUrl = request.audioUrl;
+        const fbUrl = request.fbUrl || '';
+        const videoId = request.videoId || '';
         let playerUrl = chrome.runtime.getURL('player.html') + '?url=' + encodeURIComponent(url);
         if (audioUrl) {
             playerUrl += '&audio=' + encodeURIComponent(audioUrl);
+        }
+        if (fbUrl) {
+            playerUrl += '&fbUrl=' + encodeURIComponent(fbUrl);
+        }
+        if (videoId) {
+            playerUrl += '&videoId=' + encodeURIComponent(videoId);
         }
         if (tabId) {
             chrome.tabs.update(tabId, { url: playerUrl });
