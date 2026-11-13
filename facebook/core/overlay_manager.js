@@ -262,25 +262,24 @@ class OverlayManager {
         const platform = this._getPlatform();
         const hasModal = platform && platform.hasActiveModal ? platform.hasActiveModal() : false;
         const hasMenu = platform && platform.hasActiveMenu ? platform.hasActiveMenu() : false;
+        const hasNonTheaterModal = platform && platform.hasActiveNonTheaterModal ? platform.hasActiveNonTheaterModal() : false;
+
+        // If a Facebook context menu or non-theater modal (e.g. Share dialog, composer) is open,
+        // strictly suppress all overlays and eliminate background bleed-through
+        if (hasMenu || hasNonTheaterModal) {
+            this._scheduleHide();
+            for (const entry of this.overlays.values()) {
+                this._hide(entry);
+            }
+            return;
+        }
+
         const topNavHeight = hasModal ? 0 : this._getTopNavHeight();
 
         // Top navigation bar guard: cursor is in the header, hide overlays
         if (y <= topNavHeight) {
             this._scheduleHide();
             return;
-        }
-
-        // Active modal or menu isolation: immediately hide all non-modal overlays
-        if (hasModal || hasMenu) {
-            for (const [media, entry] of this.overlays.entries()) {
-                const inM = hasModal && platform && platform.isInsideModal && platform.isInsideModal(media);
-                if (!inM) {
-                    if (entry.container.style.display !== 'none') {
-                        this._hide(entry);
-                        entry.container.style.display = 'none';
-                    }
-                }
-            }
         }
 
         // Use document.elementsFromPoint to ensure we only trigger elements the user is directly viewing
@@ -296,6 +295,24 @@ class OverlayManager {
             if (el.closest('.magic-dl-overlay')) return false;
             return el.closest('[role="dialog"], [aria-modal="true"], div.layerContainer, [role="menu"], [role="listbox"], [role="combobox"], [role="tooltip"], div[data-pagelet*="Menu" i], [aria-label*="Menu" i]');
         });
+
+        if (overlyingElement) {
+            const layer = overlyingElement.closest('[role="dialog"], [aria-modal="true"], div.layerContainer, [role="menu"], [role="listbox"], [role="combobox"], [role="tooltip"], div[data-pagelet*="Menu" i], [aria-label*="Menu" i]');
+            let hasMediaInLayer = false;
+            for (const [media, entry] of this.overlays.entries()) {
+                if (layer && layer.contains(media) && this._pointInRect(x, y, media.getBoundingClientRect())) {
+                    hasMediaInLayer = true;
+                    break;
+                }
+            }
+            if (!hasMediaInLayer) {
+                this._scheduleHide();
+                for (const entry of this.overlays.values()) {
+                    this._hide(entry);
+                }
+                return;
+            }
+        }
 
         let hoverCandidates = [];
 
@@ -393,8 +410,13 @@ class OverlayManager {
 
     _show(entry) {
         clearTimeout(this.hideTimeout);
-        if (this.activeEntry && this.activeEntry !== entry) {
-            this._hide(this.activeEntry);
+
+        // Strict Single-Overlay Enforcement:
+        // Hide and disable pointer-events on ALL other overlays to prevent any double-button overlaps!
+        for (const other of this.overlays.values()) {
+            if (other !== entry) {
+                this._hide(other);
+            }
         }
 
         // Spatial Deduplication & Ghost/Foreign Overlay Cleanup:
@@ -441,6 +463,7 @@ class OverlayManager {
         entry.container.style.opacity = '0';
         entry.container.style.visibility = 'hidden';
         entry.container.style.pointerEvents = 'none';
+        entry.container.style.display = 'none';
     }
 
     _scheduleHide() {
@@ -613,9 +636,13 @@ class OverlayManager {
             if (entry) {
                 const curPlatform = this._getPlatform();
                 const curModal = curPlatform && curPlatform.hasActiveModal ? curPlatform.hasActiveModal() : false;
+                const curMenu = curPlatform && curPlatform.hasActiveMenu ? curPlatform.hasActiveMenu() : false;
+                const curNonTheater = curPlatform && curPlatform.hasActiveNonTheaterModal ? curPlatform.hasActiveNonTheaterModal() : false;
+                if (curMenu || curNonTheater) return;
                 if (curModal && curPlatform && curPlatform.isInsideModal && !curPlatform.isInsideModal(media)) {
                     return;
                 }
+                if (this._isClippedByAncestor(media)) return;
                 this._show(entry);
             }
         };
@@ -623,8 +650,6 @@ class OverlayManager {
 
         hoverHost.addEventListener('mouseenter', hostShow, true);
         hoverHost.addEventListener('mouseleave', hostHide, true);
-        hoverHost.addEventListener('pointerenter', hostShow, true);
-        hoverHost.addEventListener('pointerleave', hostHide, true);
 
         const resizeObserver = new ResizeObserver(() => {
             this.updatePosition(media, container);
@@ -897,9 +922,11 @@ class OverlayManager {
 
         const platform = this._getPlatform();
         const hasModal = platform && platform.hasActiveModal ? platform.hasActiveModal() : false;
+        const hasMenu = platform && platform.hasActiveMenu ? platform.hasActiveMenu() : false;
+        const hasNonTheaterModal = platform && platform.hasActiveNonTheaterModal ? platform.hasActiveNonTheaterModal() : false;
 
-        // Modal isolation check
-        if (hasModal && platform && platform.isInsideModal && !platform.isInsideModal(media)) {
+        // Modal or Menu isolation check: eliminate bleed-through behind menus and non-theater dialogs
+        if (hasMenu || hasNonTheaterModal || (hasModal && platform && platform.isInsideModal && !platform.isInsideModal(media))) {
             container.style.display = 'none';
             container.style.visibility = 'hidden';
             container.style.pointerEvents = 'none';
@@ -926,33 +953,6 @@ class OverlayManager {
         }
 
         const rect = media.getBoundingClientRect();
-
-        // Real-time spatial deduplication during position updates:
-        if (rect.width > 0 && rect.height > 0) {
-            for (const [otherMedia, otherEntry] of this.overlays.entries()) {
-                if (otherMedia === media) continue;
-                const otherRect = otherMedia.getBoundingClientRect();
-                if (this._rectsOverlap(rect, otherRect, 0.45)) {
-                    const isThisVideo = media.tagName.toLowerCase() === 'video';
-                    const isOtherVideo = otherMedia.tagName.toLowerCase() === 'video';
-                    if (isThisVideo && !isOtherVideo) {
-                        this._destroyEntry(otherMedia);
-                    } else if (!isThisVideo && isOtherVideo) {
-                        this._destroyEntry(media);
-                        return;
-                    } else {
-                        const resThis = this._getMediaResolution(media);
-                        const resOther = this._getMediaResolution(otherMedia);
-                        if (resThis < resOther) {
-                            this._destroyEntry(media);
-                            return;
-                        } else {
-                            this._destroyEntry(otherMedia);
-                        }
-                    }
-                }
-            }
-        }
         const style = window.getComputedStyle(media);
         const isStyleHidden = style.opacity === '0' || style.visibility === 'hidden' || style.display === 'none';
 

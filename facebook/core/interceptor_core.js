@@ -125,7 +125,7 @@
             }
         }
 
-        const bestVideo = entry.hd || entry.dashVideo || entry.sd;
+        const bestVideo = (entry.dashVideo && entry.dashAudio) ? entry.dashVideo : (entry.hd || entry.dashVideo || entry.sd);
         if (bestVideo && isValidVideo(bestVideo)) {
             const idx = recentUrlsPool.indexOf(bestVideo);
             if (idx !== -1) recentUrlsPool.splice(idx, 1);
@@ -927,8 +927,13 @@
                     const reelId = m[1];
                     if (videoStoreById.has(reelId)) {
                         const entry = videoStoreById.get(reelId);
-                        if (entry.hd) url = entry.hd;
-                        else if (entry.dashVideo) {
+                        if (entry.dashVideo && entry.dashAudio) {
+                            url = entry.dashVideo;
+                            audioUrl = entry.dashAudio;
+                        } else if (entry.hd) {
+                            url = entry.hd;
+                            if (entry.dashAudio) audioUrl = entry.dashAudio;
+                        } else if (entry.dashVideo) {
                             url = entry.dashVideo;
                             if (!audioUrl) audioUrl = entry.dashAudio;
                         } else if (entry.sd) url = entry.sd;
@@ -940,8 +945,13 @@
             // 4. If requestedVideoId was explicitly passed from a direct link on el, check videoStoreById
             if (!url && requestedVideoId && videoStoreById.has(requestedVideoId)) {
                 const entry = videoStoreById.get(requestedVideoId);
-                if (entry.hd) url = entry.hd;
-                else if (entry.dashVideo) {
+                if (entry.dashVideo && entry.dashAudio) {
+                    url = entry.dashVideo;
+                    audioUrl = entry.dashAudio;
+                } else if (entry.hd) {
+                    url = entry.hd;
+                    if (entry.dashAudio) audioUrl = entry.dashAudio;
+                } else if (entry.dashVideo) {
                     url = entry.dashVideo;
                     if (!audioUrl) audioUrl = entry.dashAudio;
                 } else if (entry.sd) url = entry.sd;

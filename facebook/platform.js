@@ -194,6 +194,25 @@ window.ToystallerPlatforms = window.ToystallerPlatforms || {};
         },
 
         // --- Modal & Theater Mode Detection ---
+        isTheaterModal(dialog) {
+            if (!dialog) return false;
+            const label = (dialog.getAttribute('aria-label') || '').toLowerCase();
+            if (label.includes('share') || label.includes('create') || label.includes('edit') || 
+                label.includes('report') || label.includes('settings') || label.includes('message')) {
+                return false;
+            }
+            if (dialog.getAttribute('data-pagelet') === 'MediaViewer' || dialog.querySelector('div[data-pagelet="MediaViewer"]')) {
+                return true;
+            }
+            if (label.includes('media viewer') || label.includes('photo viewer')) {
+                return true;
+            }
+            if (dialog.querySelector('div[data-visualcompletion="media-vc-image"], div[role="main"] img.spotlight, div[role="main"] video')) {
+                return true;
+            }
+            return false;
+        },
+
         hasActiveModal() {
             const dialogs = document.querySelectorAll('[role="dialog"], [aria-modal="true"], div[data-pagelet="MediaViewer"]');
             for (const d of dialogs) {
@@ -210,14 +229,19 @@ window.ToystallerPlatforms = window.ToystallerPlatforms || {};
             return false;
         },
 
+        hasActiveNonTheaterModal() {
+            const active = this.getActiveModal();
+            return !!(active && !this.isTheaterModal(active));
+        },
+
         hasActiveMenu() {
-            const menus = document.querySelectorAll('[role="menu"], [role="listbox"], [role="combobox"], [data-pagelet*="Menu" i], [aria-label*="Menu" i]');
+            const menus = document.querySelectorAll('div[role="menu"], div[role="listbox"]');
             for (const m of menus) {
-                if (m.isConnected) {
+                if (m.isConnected && !m.closest('header, [role="banner"]')) {
                     const style = window.getComputedStyle(m);
                     if (style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0') {
                         const rect = m.getBoundingClientRect();
-                        if (rect.width > 30 && rect.height > 30) {
+                        if (rect.width > 50 && rect.height > 50) {
                             return true;
                         }
                     }
@@ -245,12 +269,11 @@ window.ToystallerPlatforms = window.ToystallerPlatforms || {};
         isInsideModal(media) {
             if (!media) return false;
             const modal = media.closest('[role="dialog"], [aria-modal="true"], div[data-pagelet="MediaViewer"]');
-            if (modal) return true;
+            if (modal && this.isTheaterModal(modal)) return true;
 
-            const dialogs = document.querySelectorAll('[role="dialog"], [aria-modal="true"], div[data-pagelet="MediaViewer"]');
-            for (const d of dialogs) {
-                if (d.contains(media)) return true;
-            }
+            const active = this.getActiveModal();
+            if (active && this.isTheaterModal(active) && active.contains(media)) return true;
+
             return false;
         },
 
@@ -391,17 +414,25 @@ window.ToystallerPlatforms = window.ToystallerPlatforms || {};
             // IMAGE FILTERING
             // ==========================================
             if (tagName === 'img' || tagName === 'image') {
-                // If this image is inside a video container that has a real visible <video>,
+                // If this image is inside a video container that has an active <video>,
                 // the <video> owns the buttons! Skip the poster image to prevent duplicate/overlapping buttons!
-                const container = media.closest('div[role="article"], div[data-pagelet*="FeedUnit"], div[data-pagelet*="Reel"], div.x1y1aw1k') || media.parentElement;
-                if (container) {
-                    const v = container.querySelector('video');
+                let pNode = media.parentElement;
+                for (let i = 0; i < 4 && pNode && pNode !== document.body; i++) {
+                    const v = pNode.querySelector('video');
                     if (v && v.isConnected) {
                         const vRect = v.getBoundingClientRect();
                         if (vRect.width >= 100 && vRect.height >= 80) {
-                            return true;
+                            if (Math.abs(rect.left - vRect.left) < 30 && Math.abs(rect.top - vRect.top) < 30) {
+                                return true;
+                            }
                         }
                     }
+                    pNode = pNode.parentElement;
+                }
+
+                // Exclude music/audio indicators on photo posts with songs (prevents rogue left-side button)
+                if (media.closest('[aria-label*="audio" i], [aria-label*="song" i], [aria-label*="music" i], [data-pagelet*="Audio" i], a[href*="/music/"], a[href*="/audio/"]')) {
+                    return true;
                 }
 
                 const src = (media.currentSrc || media.src || media.getAttribute('xlink:href') || media.getAttribute('href') || '').toLowerCase();
