@@ -95,6 +95,7 @@
 
         if (hdUrl && isValidVideo(hdUrl)) {
             entry.hd = hdUrl;
+            entry.isMasterProgressive = true;
             entry.allUrls.add(hdUrl);
         }
         if (sdUrl && isValidVideo(sdUrl)) {
@@ -209,15 +210,35 @@
 
         const foundUrls = new Set();
 
-        // 1. Regex search for video ID & HD / SD URLs in proximity
-        // Looks for JSON patterns like: "video_id":"123...", "playable_url_quality_hd":"..."
-        const chunkRegex = /"(?:video_id|fbid|id)"\s*:\s*"?(\d{10,25})"?[\s\S]{1,1200}?"(playable_url_quality_hd|browser_native_hd_url|hd_src|playable_url|browser_native_sd_url|sd_src)"\s*:\s*"([^"\\]*(?:\\.[^"\\]*)*)"/g;
+        // 1a. Regex search: "video_id":"123...", "playable_url_quality_hd":"..."
+        const chunkRegex = /"(?:video_id|fbid|id)"\s*:\s*"?(\d{10,25})"?[\s\S]{1,1500}?"(playable_url_quality_hd|browser_native_hd_url|hd_src|playable_url|browser_native_sd_url|sd_src)"\s*:\s*"([^"\\]*(?:\\.[^"\\]*)*)"/g;
         let cm;
         while ((cm = chunkRegex.exec(clean)) !== null) {
             const vid = cm[1];
             const key = cm[2];
             try {
                 const rawUrl = JSON.parse('"' + cm[3] + '"');
+                const u = cleanVideoUrl(rawUrl);
+                if (u && isValidVideo(u)) {
+                    foundUrls.add(u);
+                    if (key.includes('hd')) {
+                        recordVideoEntry(vid, u, null, u);
+                    } else {
+                        recordVideoEntry(vid, null, u, u);
+                    }
+                }
+            } catch (err) {}
+        }
+
+        // 1b. Reverse regex search: "playable_url_quality_hd":"...", "video_id":"123..."
+        const chunkRegexRev = /"(playable_url_quality_hd|browser_native_hd_url|hd_src|playable_url|browser_native_sd_url|sd_src)"\s*:\s*"([^"\\]*(?:\\.[^"\\]*)*)"[\s\S]{1,1500}?"(?:video_id|fbid|id)"\s*:\s*"?(\d{10,25})"?/g;
+        let cmRev;
+        while ((cmRev = chunkRegexRev.exec(clean)) !== null) {
+            const key = cmRev[1];
+            const rawUrlStr = cmRev[2];
+            const vid = cmRev[3];
+            try {
+                const rawUrl = JSON.parse('"' + rawUrlStr + '"');
                 const u = cleanVideoUrl(rawUrl);
                 if (u && isValidVideo(u)) {
                     foundUrls.add(u);
@@ -714,11 +735,22 @@
             foundAudioUrl: audioUrl ? (audioUrl.substring(0, 80) + '...') : 'null'
         });
 
+        let isMasterProgressive = false;
+        if (url) {
+            const parsedMeta = parseStreamMetadata(url);
+            const vid = detectedVideoId || (parsedMeta && parsedMeta.videoId);
+            const entry = vid ? videoStoreById.get(vid) : null;
+            if (entry && (entry.hd === url || entry.isMasterProgressive)) {
+                isMasterProgressive = true;
+            }
+        }
+
         window.postMessage({
             type: 'magic_response_react_url_' + reqId,
             url: url,
             audioUrl: audioUrl,
-            videoId: detectedVideoId
+            videoId: detectedVideoId,
+            isMasterProgressive: isMasterProgressive
         }, '*');
     });
 

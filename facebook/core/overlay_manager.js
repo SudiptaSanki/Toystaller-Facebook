@@ -363,6 +363,26 @@ class OverlayManager {
         if (this.activeEntry && this.activeEntry !== entry) {
             this._hide(this.activeEntry);
         }
+
+        // Spatial Deduplication & Ghost/Foreign Overlay Cleanup:
+        // Automatically purge any duplicate, foreign, or overlapping .magic-dl-overlay in the DOM
+        // within 35px to prevent blurry / ghosted double-button rendering!
+        const cRect = entry.container.getBoundingClientRect();
+        const allOverlays = document.querySelectorAll('.magic-dl-overlay');
+        for (const ov of allOverlays) {
+            if (ov === entry.container) continue;
+            // Purge foreign overlay without our specialized marker
+            if (!ov.hasAttribute('data-toystaller-fb')) {
+                ov.remove();
+                continue;
+            }
+            // Purge any duplicate overlay sitting at the exact same location
+            const oRect = ov.getBoundingClientRect();
+            if (oRect.width > 0 && Math.abs(oRect.top - cRect.top) < 35 && Math.abs(oRect.left - cRect.left) < 35) {
+                ov.remove();
+            }
+        }
+
         entry.container.style.display = 'flex';
         entry.container.style.opacity = '1';
         entry.container.style.visibility = 'visible';
@@ -390,10 +410,25 @@ class OverlayManager {
     hasOverlay(media) {
         if (!media) return false;
         if (this.overlays.has(media)) return true;
+        const mediaTag = media.tagName.toLowerCase();
         const hoverHost = this._findHoverHost(media);
         for (const [existingMedia, existingEntry] of this.overlays.entries()) {
             if (existingMedia === media) return true;
-            if (hoverHost && existingEntry.hoverHost && hoverHost === existingEntry.hoverHost) return true;
+            const existingTag = existingMedia.tagName.toLowerCase();
+
+            // NEVER let a background <video> (e.g. music playing for photos) suppress an <img>!
+            if (mediaTag !== existingTag) {
+                continue;
+            }
+
+            if (hoverHost && existingEntry.hoverHost && hoverHost === existingEntry.hoverHost && hoverHost !== media && hoverHost !== existingMedia) {
+                // If it's a shared parent in a collage or grid, only treat as duplicate if bounding boxes overlap
+                const mRect = media.getBoundingClientRect();
+                const eRect = existingMedia.getBoundingClientRect();
+                if (Math.abs(mRect.top - eRect.top) < 20 && Math.abs(mRect.left - eRect.left) < 20) {
+                    return true;
+                }
+            }
             if (existingMedia.contains(media) || (media.contains && media.contains(existingMedia))) return true;
         }
         return false;
@@ -466,6 +501,7 @@ class OverlayManager {
 
         const container = document.createElement('div');
         container.className = 'magic-dl-overlay';
+        container.setAttribute('data-toystaller-fb', 'true');
         container.style.cssText = `
             position: fixed;
             z-index: 2147483646;
@@ -712,7 +748,7 @@ class OverlayManager {
                 break;
             default:
                 top = rect.top + pad + topOffset;
-                left = rect.left + pad;
+                left = rect.right - width - pad;
         }
 
         const platform = this._getPlatform();

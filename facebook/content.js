@@ -269,6 +269,62 @@ function parseStreamMetadata(url) {
     return { videoId, vencodeTag, bitrate, isAudio, isVideo };
 }
 
+function isProgressiveStream(url) {
+    if (!url || typeof url !== 'string') return false;
+    const lower = url.toLowerCase();
+    const meta = parseStreamMetadata(url);
+    if (meta) {
+        if (meta.isAudio) return false;
+        if (meta.vencodeTag.includes('dash_v') || meta.vencodeTag.includes('dash_baseline')) return false;
+        if (meta.vencodeTag.includes('baseline') && !meta.vencodeTag.includes('dash')) return true;
+    }
+    if (!lower.includes('bytestart=') && !lower.includes('stream_type=dash') && (lower.includes('/v/t64.') || lower.includes('/v/t39.'))) {
+        return true;
+    }
+    return false;
+}
+
+async function fetchMasterProgressiveUrl(videoId) {
+    if (!videoId) return null;
+    try {
+        const targetUrl = `https://www.facebook.com/reel/${videoId}/`;
+        const resp = await fetch(targetUrl, {
+            method: 'GET',
+            credentials: 'include',
+            headers: {
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
+            }
+        });
+        if (!resp.ok) return null;
+        const html = await resp.text();
+
+        // 1. High definition progressive master stream (audio + video combined)
+        const hdRegex = /"(?:playable_url_quality_hd|browser_native_hd_url)"\s*:\s*"([^"\\]*(?:\\.[^"\\]*)*)"/;
+        const hdMatch = html.match(hdRegex);
+        if (hdMatch && hdMatch[1]) {
+            const raw = JSON.parse('"' + hdMatch[1] + '"');
+            const clean = cleanVideoUrl(raw);
+            if (clean && isValidVideoUrl(clean)) {
+                return clean;
+            }
+        }
+
+        // 2. Standard definition progressive master stream (audio + video combined)
+        const sdRegex = /"(?:playable_url|browser_native_sd_url)"\s*:\s*"([^"\\]*(?:\\.[^"\\]*)*)"/;
+        const sdMatch = html.match(sdRegex);
+        if (sdMatch && sdMatch[1]) {
+            const raw = JSON.parse('"' + sdMatch[1] + '"');
+            const clean = cleanVideoUrl(raw);
+            if (clean && isValidVideoUrl(clean)) {
+                return clean;
+            }
+        }
+    } catch(e) {
+        console.warn('[Toystaller] fetchMasterProgressiveUrl error:', e);
+    }
+    return null;
+}
+
 function scoreVideoUrl(url) {
     let score = 0;
     const lower = (url || '').toLowerCase();
@@ -278,11 +334,8 @@ function scoreVideoUrl(url) {
     if (meta && meta.isAudio) return -10000;
     if (lower.includes('dash_audio') || lower.includes('_audio_')) return -10000;
 
-    // Master HD Progressive Streams (Contains synchronized video + audio in one file)
-    if (lower.includes('playable_url_quality_hd')) score += 350;
-    if (lower.includes('browser_native_hd_url')) score += 320;
-    if (lower.includes('quality_hd') || lower.includes('_hd') || lower.includes('native_hd')) score += 180;
-    if (lower.includes('/v/t64.') || lower.includes('/v/t39.')) score += 120;
+    // Master HD Progressive Streams (/v/t64. or /v/t39.) with high bitrate
+    if (lower.includes('/v/t64.') || lower.includes('/v/t39.')) score += 350;
     if (lower.includes('video.fbcdn.net')) score += 30;
 
     // DASH Master Video Stream with bitrate evaluation
@@ -296,15 +349,16 @@ function scoreVideoUrl(url) {
     else if (lower.includes('480')) score += 10;
     else if (lower.includes('360')) score += 2;
 
-    // Standard definition progressive stream (Contains synchronized video + audio)
-    if (lower.includes('playable_url') && !lower.includes('quality_hd')) score += 80;
-    if (lower.includes('browser_native_sd_url')) score += 70;
+    // Standard definition progressive stream
     if (lower.includes('.mp4') || lower.includes('.m4v')) score += 20;
     
-    // Low-bitrate preview stream (/v/t42.) - Meta's 360p/480p preview cluster:
+    // Low-bitrate preview stream (/v/t42.)
     if (lower.includes('/v/t42.')) score -= 120;
     
-    // DASH manifests & segmented playlists (cannot be played directly in browser as single MP4 file)
+    // Segmented DASH chunks with bytestart/byteend
+    if (lower.includes('bytestart=') || lower.includes('byteend=')) score -= 80;
+    
+    // DASH manifests & segmented playlists
     if (lower.includes('.m3u8') || lower.includes('.mpd') || lower.includes('/playlist/') || lower.includes('/manifest/') || lower.includes('stream_type=dash')) {
         score -= 500;
     }
@@ -370,6 +424,9 @@ const PlatformManager = {
 function injectDownloadButtons() {
     if (isRawMediaTab()) return;
 
+    // Purge any foreign generic Toystaller overlays to prevent 2px blurry duplicate button rendering
+    document.querySelectorAll('.magic-dl-overlay:not([data-toystaller-fb])').forEach(ov => ov.remove());
+
     const platform = PlatformManager.getPlatform();
     const hasModal = platform.hasActiveModal();
 
@@ -401,30 +458,7 @@ function injectDownloadButtons() {
 
         const isVideo = media.tagName.toLowerCase() === 'video';
 
-        // 1. If media is an image, only skip if it directly overlaps / acts as a poster for a video element.
-        // Multi-photo posts with background music must NEVER be skipped!
-        if (!isVideo) {
-            const isPhotoTile = !!(media.closest && media.closest(
-                'a[href*="/photo"], a[href*="/photos/"], a[href*="photo.php"], ' +
-                'div[data-visualcompletion*="media"], div[data-visualcompletion="ignore-dynamic-extra-coverage"]'
-            ));
-
-            if (!isPhotoTile) {
-                const immediateVideoWrap = media.closest('div[data-pagelet*="Reel"], div[data-pagelet*="Video"], div[data-video-id], div.x14yjl9h');
-                if (immediateVideoWrap) {
-                    const v = immediateVideoWrap.querySelector('video');
-                    if (v && v !== media) {
-                        const vRect = v.getBoundingClientRect();
-                        const mRect = media.getBoundingClientRect();
-                        if (Math.abs(vRect.left - mRect.left) < 40 && Math.abs(vRect.top - mRect.top) < 40) {
-                            return; // Image is directly overlapping the video element as a poster/cover
-                        }
-                    }
-                }
-            }
-        }
-
-        // 2. Photo tile deduplication: strictly 1 media element per individual photo container
+        // 1. Photo tile deduplication: strictly 1 media element per individual photo container
         if (!isVideo) {
             const tile = media.closest ? media.closest(
                 'a[href*="/photo"], a[href*="/photos/"], a[href*="photo.php"], ' +
@@ -432,10 +466,13 @@ function injectDownloadButtons() {
                 'div[role="button"][tabindex]'
             ) : null;
             if (tile) {
-                if (tile.__toystallerBoundMedia && tile.__toystallerBoundMedia.isConnected && tile.__toystallerBoundMedia !== media) {
-                    return; // Tile already has an active media element
+                const innerImgs = tile.querySelectorAll('img, div[role="img"]');
+                if (innerImgs.length <= 1) {
+                    if (tile.__toystallerBoundMedia && tile.__toystallerBoundMedia.isConnected && tile.__toystallerBoundMedia !== media) {
+                        return; // Tile already has an active media element
+                    }
+                    tile.__toystallerBoundMedia = media;
                 }
-                tile.__toystallerBoundMedia = media;
             }
 
             // Exclude blur placeholders if a non-blurred sibling exists
@@ -601,26 +638,45 @@ function injectDownloadButtons() {
                     openBtn.style.opacity = '0.35';
                     openBtn.style.pointerEvents = 'none';
 
+                    let resolved = false;
+
+                    // Fast-path: Fetch master progressive stream with synchronized audio directly via same-origin fetch
+                    if (currentId) {
+                        fetchMasterProgressiveUrl(currentId).then(masterUrl => {
+                            if (resolved) return;
+                            if (masterUrl && isValidVideoUrl(masterUrl)) {
+                                resolved = true;
+                                openBtn.style.opacity = '1';
+                                openBtn.style.pointerEvents = 'auto';
+                                openBtn.__resolvedVideoUrl = masterUrl;
+                                openBtn.__resolvedAudioUrl = null;
+                                openBtn.__resolvedVideoId = currentId;
+                                console.log(`[Toystaller] Fast-path master progressive stream resolved with audio for [${currentId}]!`);
+                                openVideo(masterUrl, null);
+                            }
+                        }).catch(() => {});
+                    }
+
                     // Safe extraction with retry loop
                     let attempts = 0;
                     const maxAttempts = 6;
 
                     const tryExtract = () => {
+                        if (resolved) return;
                         attempts++;
-                        getMediaUrl((url, audioUrl, returnedVideoId) => {
+                        getMediaUrl((url, audioUrl, returnedVideoId, isMaster) => {
+                            if (resolved) return;
+
                             // If a specific Reel ID is expected, reject mismatching streams
                             if (currentId && returnedVideoId && returnedVideoId !== currentId) {
                                 console.warn(`[Toystaller] Returned ID (${returnedVideoId}) does not match active Reel (${currentId}), retrying...`);
                                 url = null;
                             }
 
-                            const isMasterProgressive = url && (
-                                url.toLowerCase().includes('playable_url_quality_hd') ||
-                                url.toLowerCase().includes('browser_native_hd_url') ||
-                                url.toLowerCase().includes('hd_src')
-                            );
+                            const isMasterProgressive = isMaster || isProgressiveStream(url);
 
                             if (url && isValidVideoUrl(url) && (audioUrl || isMasterProgressive)) {
+                                resolved = true;
                                 openBtn.style.opacity = '1';
                                 openBtn.style.pointerEvents = 'auto';
                                 openBtn.__resolvedVideoUrl = url;
@@ -628,7 +684,8 @@ function injectDownloadButtons() {
                                 openBtn.__resolvedVideoId = currentId || returnedVideoId;
                                 console.log(`[Toystaller] Successfully resolved Reel [${currentId || returnedVideoId}]:`, {
                                     video: url,
-                                    audio: audioUrl
+                                    audio: audioUrl,
+                                    isMasterProgressive: isMasterProgressive
                                 });
                                 openVideo(url, audioUrl);
                                 return;
@@ -641,6 +698,7 @@ function injectDownloadButtons() {
                                 }
                                 setTimeout(tryExtract, 350);
                             } else {
+                                if (resolved) return;
                                 openBtn.style.opacity = '1';
                                 openBtn.style.pointerEvents = 'auto';
 
@@ -744,7 +802,7 @@ function injectDownloadButtons() {
                         const clean = cleanVideoUrl(e.data.url);
                         const cleanAudio = cleanVideoUrl(e.data.audioUrl);
                         if (clean && isValidVideoUrl(clean)) {
-                            callback(clean, cleanAudio, e.data.videoId);
+                            callback(clean, cleanAudio, e.data.videoId, e.data.isMasterProgressive);
                         } else {
                             getMediaUrlFallback(callback, silent, currentId);
                         }

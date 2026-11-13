@@ -289,18 +289,22 @@ window.ToystallerPlatforms = window.ToystallerPlatforms || {};
                 }
             }
 
-            // Video player container with video ID
-            const videoContainer = media.closest('div[data-video-id], div.x1y1aw1k');
-            if (videoContainer) return videoContainer;
+            // Video player container with video ID (strictly for video elements)
+            if (media.tagName && media.tagName.toLowerCase() === 'video') {
+                const videoContainer = media.closest('div[data-video-id], div.x1y1aw1k');
+                if (videoContainer) return videoContainer;
+            }
 
-            // In multi-image posts or collages, return the individual photo wrapper, NEVER the entire article
+            // In multi-image posts, collages, or photo posts with background music,
+            // return the individual photo wrapper, NEVER the entire article
             if (article) {
                 const totalImages = article.querySelectorAll('img, image, div[role="img"]').length;
-                if (totalImages > 1) {
+                const hasBackgroundVideo = article.querySelector('video') !== null;
+                if (totalImages > 1 || hasBackgroundVideo) {
                     let parent = media.parentElement;
                     for (let i = 0; i < 5 && parent && parent !== article; i++) {
                         const pRect = parent.getBoundingClientRect();
-                        if (pRect.width >= 40 && pRect.height >= 40 && pRect.width <= article.getBoundingClientRect().width * 0.95) {
+                        if (pRect.width >= 40 && pRect.height >= 40 && pRect.width <= article.getBoundingClientRect().width * 0.98) {
                             return parent;
                         }
                         parent = parent.parentElement;

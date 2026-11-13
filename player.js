@@ -255,6 +255,7 @@
         }
     } else {
         if (audioStatusText) audioStatusText.textContent = 'Direct Master Audio + Video';
+        if (dlBtnLabel) dlBtnLabel.textContent = 'Download HD Video (with Sound)';
     }
 
     // Video Aspect Ratio & Quality detection
@@ -296,13 +297,27 @@
     // Download Video (HD)
     dlBtn.addEventListener('click', () => {
         const idMatch = videoUrl.match(/\/(\d+_[^/?]+)/);
-        const filename = idMatch ? `Facebook_${idMatch[1]}.mp4` : `Facebook_Video_${Date.now()}.mp4`;
+        const baseName = idMatch ? `Facebook_${idMatch[1]}` : `Facebook_Video_${Date.now()}`;
+        
+        // If separate companion audio URL exists and user clicked dlBtn, download both video and audio files together
+        // so the user never gets left without sound!
+        const isPaired = !!audioUrl;
+        const filename = isPaired ? `${baseName}_video.mp4` : `${baseName}.mp4`;
         
         chrome.runtime.sendMessage({
             action: 'downloadMedia',
             url: videoUrl,
             filename: filename
         }, (response) => {
+            if (isPaired) {
+                setTimeout(() => {
+                    chrome.runtime.sendMessage({
+                        action: 'downloadMedia',
+                        url: audioUrl,
+                        filename: `${baseName}_audio.mp4`
+                    });
+                }, 600);
+            }
             if (response && response.success) {
                 dlBtn.innerHTML = `
                     <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
