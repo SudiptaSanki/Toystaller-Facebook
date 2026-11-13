@@ -42,6 +42,15 @@ class OverlayManager {
         }, { passive: true, capture: true });
         window.addEventListener('resize', () => this.updateAllPositions());
 
+        // Instant click dismiss — when clicking outside an overlay (e.g. opening Facebook menu or Share modal), immediately hide active overlay
+        window.addEventListener('click', (e) => {
+            if (e.target && e.target.closest && e.target.closest('.magic-dl-overlay')) return;
+            for (const entry of this.overlays.values()) {
+                this._hide(entry);
+            }
+            this.activeEntry = null;
+        }, true);
+
         // Instant modal listener — when a dialog/modal opens or closes, immediately sync overlay visibility
         this._modalObserver = new MutationObserver(() => {
             this.updateAllPositions();
@@ -252,6 +261,7 @@ class OverlayManager {
 
         const platform = this._getPlatform();
         const hasModal = platform && platform.hasActiveModal ? platform.hasActiveModal() : false;
+        const hasMenu = platform && platform.hasActiveMenu ? platform.hasActiveMenu() : false;
         const topNavHeight = hasModal ? 0 : this._getTopNavHeight();
 
         // Top navigation bar guard: cursor is in the header, hide overlays
@@ -259,6 +269,33 @@ class OverlayManager {
             this._scheduleHide();
             return;
         }
+
+        // Active modal or menu isolation: immediately hide all non-modal overlays
+        if (hasModal || hasMenu) {
+            for (const [media, entry] of this.overlays.entries()) {
+                const inM = hasModal && platform && platform.isInsideModal && platform.isInsideModal(media);
+                if (!inM) {
+                    if (entry.container.style.display !== 'none') {
+                        this._hide(entry);
+                        entry.container.style.display = 'none';
+                    }
+                }
+            }
+        }
+
+        // Use document.elementsFromPoint to ensure we only trigger elements the user is directly viewing
+        const hits = document.elementsFromPoint(x, y);
+        if (!hits || hits.length === 0) {
+            this._scheduleHide();
+            return;
+        }
+
+        // Check if cursor is over ANY overlying Facebook UI layer (modals, dialogs, menus, tooltips, popups, dropdowns)
+        const overlyingElement = hits.find(el => {
+            if (!el || el === document.body || el === document.documentElement) return false;
+            if (el.closest('.magic-dl-overlay')) return false;
+            return el.closest('[role="dialog"], [aria-modal="true"], div.layerContainer, [role="menu"], [role="listbox"], [role="combobox"], [role="tooltip"], div[data-pagelet*="Menu" i], [aria-label*="Menu" i]');
+        });
 
         let hoverCandidates = [];
 
@@ -274,6 +311,11 @@ class OverlayManager {
             }
 
             if (entry.container.style.display === 'none') continue;
+
+            // If an overlying element covers this point and media is not inside it, ignore button hit!
+            if (overlyingElement && !overlyingElement.contains(media)) {
+                continue;
+            }
 
             const btnRect = entry.container.getBoundingClientRect();
             if (btnRect.width > 0 && this._pointInRect(x, y, btnRect)) {
@@ -295,18 +337,17 @@ class OverlayManager {
             return;
         }
 
-        // 2. Use document.elementsFromPoint to ensure we only trigger elements that the user is actually hovering
-        const hits = document.elementsFromPoint(x, y);
-        if (!hits || hits.length === 0) {
-            this._scheduleHide();
-            return;
-        }
-
         let matchedCandidates = [];
 
         for (const candidate of hoverCandidates) {
             const entry = candidate.entry;
             const media = candidate.media;
+
+            // If an overlying modal or menu covers this point and candidate is not inside it, skip candidate!
+            if (overlyingElement && !overlyingElement.contains(media)) {
+                continue;
+            }
+
             const mRect = media.getBoundingClientRect();
             const hRect = entry.hoverHost ? entry.hoverHost.getBoundingClientRect() : mRect;
 
@@ -314,23 +355,15 @@ class OverlayManager {
             const inHost = this._pointInRect(x, y, hRect);
 
             if (inMedia || inHost) {
-                // If cursor is directly inside the media rectangle, accept immediately!
-                // (Bypasses Facebook's transparent click-interceptor / overlay wrappers)
-                if (inMedia) {
-                    if (!matchedCandidates.includes(candidate)) {
-                        matchedCandidates.push(candidate);
-                    }
-                } else {
-                    const belongs = hits.some(el => {
-                        if (el === media || media.contains(el)) return true;
-                        if (entry.hoverHost && (el === entry.hoverHost || entry.hoverHost.contains(el))) return true;
-                        const card = media.closest('a[href*="/reel"], a[href*="/reels"], div[data-pagelet*="Reel"], div[role="article"], div[role="listitem"], div[data-pagelet*="FeedUnit"], div.x1y1aw1k');
-                        if (card && (el === card || card.contains(el))) return true;
-                        return false;
-                    });
-                    if (belongs && !matchedCandidates.includes(candidate)) {
-                        matchedCandidates.push(candidate);
-                    }
+                const belongs = hits.some(el => {
+                    if (el === media || media.contains(el)) return true;
+                    if (entry.hoverHost && (el === entry.hoverHost || entry.hoverHost.contains(el))) return true;
+                    const card = media.closest('a[href*="/reel"], a[href*="/reels"], div[data-pagelet*="Reel"], div[role="article"], div[role="listitem"], div[data-pagelet*="FeedUnit"], div.x1y1aw1k');
+                    if (card && (el === card || card.contains(el))) return true;
+                    return false;
+                });
+                if (belongs && !matchedCandidates.includes(candidate)) {
+                    matchedCandidates.push(candidate);
                 }
             }
         }
@@ -382,6 +415,10 @@ class OverlayManager {
                 ov.remove();
             }
         }
+
+        const platform = this._getPlatform();
+        const inModal = platform && platform.isInsideModal ? platform.isInsideModal(entry.media) : false;
+        entry.container.style.zIndex = inModal ? '2500' : '150';
 
         entry.container.style.display = 'flex';
         entry.container.style.opacity = '1';
@@ -504,7 +541,7 @@ class OverlayManager {
         container.setAttribute('data-toystaller-fb', 'true');
         container.style.cssText = `
             position: fixed;
-            z-index: 2147483646;
+            z-index: 150;
             display: flex;
             gap: 6px;
             pointer-events: none;
@@ -546,7 +583,7 @@ class OverlayManager {
             resizeObserver.observe(hoverHost);
         }
 
-        const entry = { container, corner: null, resizeObserver, hoverHost, isVisible: true, intersectionObserver: null };
+        const entry = { container, corner: null, resizeObserver, hoverHost, isVisible: true, intersectionObserver: null, media };
         
         entry.intersectionObserver = new IntersectionObserver((entries) => {
             for (const e of entries) {

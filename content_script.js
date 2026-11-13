@@ -295,6 +295,88 @@ function isProgressiveStream(url) {
     return false;
 }
 
+// --- yt-dlp DASH Manifest Parser for Full HD / 2K Extraction ---
+function parseDashManifestXml(manifestXml) {
+    if (!manifestXml || typeof manifestXml !== 'string') return null;
+    let xml = manifestXml;
+    if (xml.includes('%3CMPD') || xml.includes('%3Cmpd')) {
+        try { xml = decodeURIComponent(xml); } catch(e) {}
+    }
+    xml = xml.replace(/\\"/g, '"').replace(/\\\//g, '/').replace(/&amp;/g, '&');
+
+    const videoReps = [];
+    const audioReps = [];
+
+    try {
+        const parser = new DOMParser();
+        const doc = parser.parseFromString(xml, 'application/xml');
+        const adaptationSets = doc.querySelectorAll('AdaptationSet');
+        for (const adSet of adaptationSets) {
+            const mime = (adSet.getAttribute('mimeType') || adSet.getAttribute('contentType') || '').toLowerCase();
+            const isAudio = mime.includes('audio');
+
+            const reps = adSet.querySelectorAll('Representation');
+            for (const rep of reps) {
+                const baseElem = rep.querySelector('BaseURL');
+                const rawUrl = baseElem ? baseElem.textContent.trim() : null;
+                if (!rawUrl) continue;
+
+                const clean = cleanVideoUrl(rawUrl);
+                if (!clean) continue;
+
+                const width = parseInt(rep.getAttribute('width') || '0', 10);
+                const height = parseInt(rep.getAttribute('height') || '0', 10);
+                const bandwidth = parseInt(rep.getAttribute('bandwidth') || '0', 10);
+                const qualityLabel = rep.getAttribute('FBQualityLabel') || '';
+
+                if (isAudio) {
+                    audioReps.push({ url: clean, bandwidth });
+                } else {
+                    videoReps.push({ url: clean, width, height, bandwidth, qualityLabel, pixels: width * height });
+                }
+            }
+        }
+    } catch(err) {
+        const repRegex = /<Representation\b([^>]*)>([\s\S]*?)<\/Representation>/gi;
+        let rm;
+        while ((rm = repRegex.exec(xml)) !== null) {
+            const attrs = rm[1];
+            const body = rm[2];
+            const baseMatch = body.match(/<BaseURL>([^<]+)<\/BaseURL>/i);
+            if (!baseMatch) continue;
+            const clean = cleanVideoUrl(baseMatch[1]);
+            if (!clean) continue;
+
+            const isAudio = attrs.includes('audio') || clean.includes('dash_audio') || clean.includes('_audio_');
+            const wMatch = attrs.match(/width="(\d+)"/i);
+            const hMatch = attrs.match(/height="(\d+)"/i);
+            const bMatch = attrs.match(/bandwidth="(\d+)"/i);
+            const qMatch = attrs.match(/FBQualityLabel="([^"]+)"/i);
+
+            const width = wMatch ? parseInt(wMatch[1], 10) : 0;
+            const height = hMatch ? parseInt(hMatch[1], 10) : 0;
+            const bandwidth = bMatch ? parseInt(bMatch[1], 10) : 0;
+            const qualityLabel = qMatch ? qMatch[1] : '';
+
+            if (isAudio) {
+                audioReps.push({ url: clean, bandwidth });
+            } else {
+                videoReps.push({ url: clean, width, height, bandwidth, qualityLabel, pixels: width * height });
+            }
+        }
+    }
+
+    videoReps.sort((a, b) => (b.pixels - a.pixels) || (b.bandwidth - a.bandwidth));
+    audioReps.sort((a, b) => b.bandwidth - a.bandwidth);
+
+    return {
+        bestVideo: videoReps.length > 0 ? videoReps[0] : null,
+        allVideos: videoReps,
+        bestAudio: audioReps.length > 0 ? audioReps[0] : null,
+        allAudios: audioReps
+    };
+}
+
 async function fetchMasterProgressiveUrl(videoId) {
     if (!videoId) return null;
     try {
@@ -309,26 +391,78 @@ async function fetchMasterProgressiveUrl(videoId) {
         if (!resp.ok) return null;
         const html = await resp.text();
 
-        // 1. High definition progressive master stream (audio + video combined)
+        // 1. DASH MPD Manifest parsing (yt-dlp Full HD 1080p / 2K format extraction)
+        const manifestRegex = /"(?:dash_manifest|dash_manifest_xml_string|manifest_xml)"\s*:\s*"([^"\\]*(?:\\.[^"\\]*)*)"/;
+        const manifestMatch = html.match(manifestRegex);
+        let dashRes = null;
+        if (manifestMatch && manifestMatch[1]) {
+            try {
+                const rawXml = JSON.parse('"' + manifestMatch[1] + '"');
+                dashRes = parseDashManifestXml(rawXml);
+            } catch(e) {}
+        }
+
+        // 2. High definition progressive master stream (audio + video combined)
+        let progHd = null;
         const hdRegex = /"(?:playable_url_quality_hd|browser_native_hd_url)"\s*:\s*"([^"\\]*(?:\\.[^"\\]*)*)"/;
         const hdMatch = html.match(hdRegex);
         if (hdMatch && hdMatch[1]) {
-            const raw = JSON.parse('"' + hdMatch[1] + '"');
-            const clean = cleanVideoUrl(raw);
-            if (clean && isValidVideoUrl(clean)) {
-                return clean;
-            }
+            try {
+                const raw = JSON.parse('"' + hdMatch[1] + '"');
+                const clean = cleanVideoUrl(raw);
+                if (clean && isValidVideoUrl(clean)) {
+                    progHd = clean;
+                }
+            } catch(e) {}
         }
 
-        // 2. Standard definition progressive master stream (audio + video combined)
+        // Resolution comparison (yt-dlp bestvideo+bestaudio logic):
+        // If DASH provides 1080p (pixels >= 1080*1920) or 2K, and audio exists:
+        if (dashRes && dashRes.bestVideo && dashRes.bestVideo.pixels >= 1920 * 1080 && dashRes.bestAudio) {
+            return {
+                url: dashRes.bestVideo.url,
+                audioUrl: dashRes.bestAudio.url,
+                isMasterProgressive: false,
+                quality: dashRes.bestVideo.qualityLabel || 'Full HD (1080p)'
+            };
+        }
+
+        // Else if progressive master HD exists:
+        if (progHd) {
+            return {
+                url: progHd,
+                audioUrl: dashRes && dashRes.bestAudio ? dashRes.bestAudio.url : null,
+                isMasterProgressive: true,
+                quality: 'Master HD (720p)'
+            };
+        }
+
+        // Else if any DASH video exists:
+        if (dashRes && dashRes.bestVideo) {
+            return {
+                url: dashRes.bestVideo.url,
+                audioUrl: dashRes.bestAudio ? dashRes.bestAudio.url : null,
+                isMasterProgressive: false,
+                quality: dashRes.bestVideo.qualityLabel || 'HD Video'
+            };
+        }
+
+        // 3. Fallback to standard definition ONLY if no HD / DASH streams exist anywhere
         const sdRegex = /"(?:playable_url|browser_native_sd_url)"\s*:\s*"([^"\\]*(?:\\.[^"\\]*)*)"/;
         const sdMatch = html.match(sdRegex);
         if (sdMatch && sdMatch[1]) {
-            const raw = JSON.parse('"' + sdMatch[1] + '"');
-            const clean = cleanVideoUrl(raw);
-            if (clean && isValidVideoUrl(clean)) {
-                return clean;
-            }
+            try {
+                const raw = JSON.parse('"' + sdMatch[1] + '"');
+                const clean = cleanVideoUrl(raw);
+                if (clean && isValidVideoUrl(clean)) {
+                    return {
+                        url: clean,
+                        audioUrl: null,
+                        isMasterProgressive: true,
+                        quality: 'SD MP4'
+                    };
+                }
+            } catch(e) {}
         }
     } catch(e) {
         console.warn('[Toystaller] fetchMasterProgressiveUrl error:', e);
@@ -674,13 +808,13 @@ function injectDownloadButtons() {
                                 return;
                             }
 
-                            // If we have video but no audio, and an associated video ID exists, upgrade to master progressive stream
+                            // If we have video but no audio, and an associated video ID exists, upgrade using yt-dlp format resolution logic
                             if (url && isValidVideoUrl(url) && targetVideoId && !isMasterProgressive && !audioUrl) {
-                                fetchMasterProgressiveUrl(targetVideoId).then(masterUrl => {
+                                fetchMasterProgressiveUrl(targetVideoId).then(res => {
                                     openBtn.style.opacity = '1';
                                     openBtn.style.pointerEvents = 'auto';
-                                    if (masterUrl && isValidVideoUrl(masterUrl)) {
-                                        openVideo(masterUrl, null, targetVideoId);
+                                    if (res && res.url && isValidVideoUrl(res.url)) {
+                                        openVideo(res.url, res.audioUrl, targetVideoId);
                                     } else {
                                         openVideo(url, null, targetVideoId);
                                     }

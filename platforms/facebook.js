@@ -195,13 +195,29 @@ window.ToystallerPlatforms = window.ToystallerPlatforms || {};
 
         // --- Modal & Theater Mode Detection ---
         hasActiveModal() {
-            const dialogs = document.querySelectorAll('[role="dialog"], [aria-modal="true"], div[data-pagelet="MediaViewer"]');
+            const dialogs = document.querySelectorAll('[role="dialog"], [aria-modal="true"], div[data-pagelet="MediaViewer"], div.layerContainer');
             for (const d of dialogs) {
                 if (d.isConnected) {
                     const style = window.getComputedStyle(d);
                     if (style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0') {
                         const rect = d.getBoundingClientRect();
-                        if (rect.width > window.innerWidth * 0.35 && rect.height > window.innerHeight * 0.35) {
+                        if (rect.width > 60 && rect.height > 60) {
+                            return true;
+                        }
+                    }
+                }
+            }
+            return false;
+        },
+
+        hasActiveMenu() {
+            const menus = document.querySelectorAll('[role="menu"], [role="listbox"], [role="combobox"], [data-pagelet*="Menu" i], [aria-label*="Menu" i]');
+            for (const m of menus) {
+                if (m.isConnected) {
+                    const style = window.getComputedStyle(m);
+                    if (style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0') {
+                        const rect = m.getBoundingClientRect();
+                        if (rect.width > 30 && rect.height > 30) {
                             return true;
                         }
                     }
@@ -211,12 +227,15 @@ window.ToystallerPlatforms = window.ToystallerPlatforms || {};
         },
 
         getActiveModal() {
-            const dialogs = document.querySelectorAll('[role="dialog"], [aria-modal="true"], div[data-pagelet="MediaViewer"]');
+            const dialogs = document.querySelectorAll('[role="dialog"], [aria-modal="true"], div[data-pagelet="MediaViewer"], div.layerContainer');
             for (const d of dialogs) {
                 if (d.isConnected) {
-                    const rect = d.getBoundingClientRect();
-                    if (rect.width > window.innerWidth * 0.35 && rect.height > window.innerHeight * 0.35) {
-                        return d;
+                    const style = window.getComputedStyle(d);
+                    if (style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0') {
+                        const rect = d.getBoundingClientRect();
+                        if (rect.width > 60 && rect.height > 60) {
+                            return d;
+                        }
                     }
                 }
             }
@@ -225,14 +244,19 @@ window.ToystallerPlatforms = window.ToystallerPlatforms || {};
 
         isInsideModal(media) {
             if (!media) return false;
-            const modal = media.closest('[role="dialog"], [aria-modal="true"], div[data-pagelet="MediaViewer"]');
+            const modal = media.closest('[role="dialog"], [aria-modal="true"], div[data-pagelet="MediaViewer"], div.layerContainer');
             if (modal) return true;
 
-            const dialogs = document.querySelectorAll('[role="dialog"], [aria-modal="true"], div[data-pagelet="MediaViewer"]');
+            const dialogs = document.querySelectorAll('[role="dialog"], [aria-modal="true"], div[data-pagelet="MediaViewer"], div.layerContainer');
             for (const d of dialogs) {
                 if (d.contains(media)) return true;
             }
             return false;
+        },
+
+        isInsideMenu(media) {
+            if (!media) return false;
+            return !!media.closest('[role="menu"], [role="listbox"], [role="combobox"], [data-pagelet*="Menu" i], [aria-label*="Menu" i]');
         },
 
         getHoverHost(media) {
@@ -700,37 +724,57 @@ window.ToystallerPlatforms = window.ToystallerPlatforms || {};
 
             // 1. Direct dataset check on element
             if (el.dataset && (el.dataset.videoId || el.dataset.video_id)) {
-                return el.dataset.videoId || el.dataset.video_id;
+                return String(el.dataset.videoId || el.dataset.video_id).trim();
             }
 
-            // 2. Direct ancestor wrapper link (ancestor checks only — NEVER query descendants across carousel shelves!)
-            const directLink = el.closest ? el.closest('a[href*="/reel/"], a[href*="/reels/"], a[href*="/videos/"], a[href*="/watch/"]') : null;
+            // 2. Direct ancestor wrapper link
+            const directLink = el.closest ? el.closest('a[href*="/reel/"], a[href*="/reels/"], a[href*="/videos/"], a[href*="/watch/"], a[href*="/share/r/"]') : null;
             if (directLink && directLink.href) {
-                const m = directLink.href.match(/(?:reel(?:s)?\/|videos\/|watch\/?\?v=)(\d+)/);
+                const m = directLink.href.match(/(?:reel(?:s)?\/|videos\/|watch\/?\?v=|\/share\/r\/)(\d{10,25})/);
                 if (m) return m[1];
             }
 
-            // 3. Immediate parent containers up to 4 levels (strictly stopping before feed/carousel trays)
-            let curr = el.parentElement;
-            for (let i = 0; i < 4 && curr && curr !== document.body; i++) {
-                if (curr.dataset && (curr.dataset.videoId || curr.dataset.video_id)) {
-                    return curr.dataset.videoId || curr.dataset.video_id;
+            // 3. Immediate Reel card container (for Homepage carousel / Reels shelf)
+            // Strictly scope search within this specific card to avoid cross-card leakage!
+            const card = el.closest ? el.closest('div[role="listitem"], div[data-pagelet*="Reel_"], div[data-visualcompletion*="ignore-dynamic"]') : null;
+            if (card) {
+                const cardLink = card.querySelector('a[href*="/reel/"], a[href*="/reels/"], a[href*="/videos/"], a[href*="/watch/"], a[href*="/share/r/"]');
+                if (cardLink && cardLink.href) {
+                    const m = cardLink.href.match(/(?:reel(?:s)?\/|videos\/|watch\/?\?v=|\/share\/r\/)(\d{10,25})/);
+                    if (m) return m[1];
                 }
-                // Stop immediately if reaching a FeedUnit, Reel tray, or post card
-                if (curr.getAttribute('role') === 'article' || (curr.dataset && curr.dataset.pagelet && (curr.dataset.pagelet.includes('FeedUnit') || curr.dataset.pagelet.includes('Reel')))) {
-                    break;
+            }
+
+            // 4. Feed Post container (div[role="article"] or FeedUnit)
+            // In Homepage feed posts, find the permalink in post header strictly within THIS post
+            const article = el.closest ? el.closest('div[role="article"], div[data-pagelet*="FeedUnit"]') : null;
+            if (article) {
+                const postLinks = article.querySelectorAll('a[href*="/reel/"], a[href*="/reels/"], a[href*="/videos/"], a[href*="/watch/"], a[href*="/share/r/"]');
+                for (const l of postLinks) {
+                    if (l && l.href) {
+                        const m = l.href.match(/(?:reel(?:s)?\/|videos\/|watch\/?\?v=|\/share\/r\/)(\d{10,25})/);
+                        if (m) return m[1];
+                    }
+                }
+            }
+
+            // 5. Parent containers checking data attributes up to 6 levels
+            let curr = el.parentElement;
+            for (let i = 0; i < 6 && curr && curr !== document.body; i++) {
+                if (curr.dataset && (curr.dataset.videoId || curr.dataset.video_id)) {
+                    return String(curr.dataset.videoId || curr.dataset.video_id).trim();
                 }
                 curr = curr.parentElement;
             }
 
-            // 4. Check dedicated page URL if on /reel/<id> or /watch/?v=<id>
+            // 6. Check dedicated page URL if on /reel/<id> or /watch/?v=<id>
             const path = window.location.pathname.toLowerCase();
             if (path.includes('/reel/')) {
-                const m = path.match(/\/reel\/(\d+)/);
+                const m = path.match(/\/reel\/(\d{10,25})/);
                 if (m) return m[1];
             }
             if (path.includes('/videos/') || window.location.search.includes('v=')) {
-                const m = (path + window.location.search).match(/(?:videos\/|v=)(\d+)/);
+                const m = (path + window.location.search).match(/(?:videos\/|v=)(\d{10,25})/);
                 if (m) return m[1];
             }
 

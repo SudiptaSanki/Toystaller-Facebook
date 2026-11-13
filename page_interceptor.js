@@ -199,9 +199,91 @@
         return clean.trim().replace(/^["']|["']$/g, '');
     }
 
+    // --- yt-dlp DASH Manifest Parser for Full HD / 2K Extraction ---
+    function parseDashManifestXml(manifestXml) {
+        if (!manifestXml || typeof manifestXml !== 'string') return null;
+        let xml = manifestXml;
+        if (xml.includes('%3CMPD') || xml.includes('%3Cmpd')) {
+            try { xml = decodeURIComponent(xml); } catch(e) {}
+        }
+        xml = xml.replace(/\\"/g, '"').replace(/\\\//g, '/').replace(/&amp;/g, '&');
+
+        const videoReps = [];
+        const audioReps = [];
+
+        try {
+            const parser = new DOMParser();
+            const doc = parser.parseFromString(xml, 'application/xml');
+            const adaptationSets = doc.querySelectorAll('AdaptationSet');
+            for (const adSet of adaptationSets) {
+                const mime = (adSet.getAttribute('mimeType') || adSet.getAttribute('contentType') || '').toLowerCase();
+                const isAudio = mime.includes('audio');
+
+                const reps = adSet.querySelectorAll('Representation');
+                for (const rep of reps) {
+                    const baseElem = rep.querySelector('BaseURL');
+                    const rawUrl = baseElem ? baseElem.textContent.trim() : null;
+                    if (!rawUrl) continue;
+
+                    const clean = cleanVideoUrl(rawUrl);
+                    if (!clean) continue;
+
+                    const width = parseInt(rep.getAttribute('width') || '0', 10);
+                    const height = parseInt(rep.getAttribute('height') || '0', 10);
+                    const bandwidth = parseInt(rep.getAttribute('bandwidth') || '0', 10);
+                    const qualityLabel = rep.getAttribute('FBQualityLabel') || '';
+
+                    if (isAudio) {
+                        audioReps.push({ url: clean, bandwidth });
+                    } else {
+                        videoReps.push({ url: clean, width, height, bandwidth, qualityLabel, pixels: width * height });
+                    }
+                }
+            }
+        } catch(err) {
+            const repRegex = /<Representation\b([^>]*)>([\s\S]*?)<\/Representation>/gi;
+            let rm;
+            while ((rm = repRegex.exec(xml)) !== null) {
+                const attrs = rm[1];
+                const body = rm[2];
+                const baseMatch = body.match(/<BaseURL>([^<]+)<\/BaseURL>/i);
+                if (!baseMatch) continue;
+                const clean = cleanVideoUrl(baseMatch[1]);
+                if (!clean) continue;
+
+                const isAudio = attrs.includes('audio') || clean.includes('dash_audio') || clean.includes('_audio_');
+                const wMatch = attrs.match(/width="(\d+)"/i);
+                const hMatch = attrs.match(/height="(\d+)"/i);
+                const bMatch = attrs.match(/bandwidth="(\d+)"/i);
+                const qMatch = attrs.match(/FBQualityLabel="([^"]+)"/i);
+
+                const width = wMatch ? parseInt(wMatch[1], 10) : 0;
+                const height = hMatch ? parseInt(hMatch[1], 10) : 0;
+                const bandwidth = bMatch ? parseInt(bMatch[1], 10) : 0;
+                const qualityLabel = qMatch ? qMatch[1] : '';
+
+                if (isAudio) {
+                    audioReps.push({ url: clean, bandwidth });
+                } else {
+                    videoReps.push({ url: clean, width, height, bandwidth, qualityLabel, pixels: width * height });
+                }
+            }
+        }
+
+        videoReps.sort((a, b) => (b.pixels - a.pixels) || (b.bandwidth - a.bandwidth));
+        audioReps.sort((a, b) => b.bandwidth - a.bandwidth);
+
+        return {
+            bestVideo: videoReps.length > 0 ? videoReps[0] : null,
+            allVideos: videoReps,
+            bestAudio: audioReps.length > 0 ? audioReps[0] : null,
+            allAudios: audioReps
+        };
+    }
+
     // --- Parse JSON / Relay Chunks with Video ID Association ---
     function extractUrlsFromText(text) {
-        if (!text || (!text.includes('fbcdn.net') && !text.includes('fbsbx.com') && !text.includes('playable_url') && !text.includes('browser_native_hd_url'))) return;
+        if (!text || (!text.includes('fbcdn.net') && !text.includes('fbsbx.com') && !text.includes('playable_url') && !text.includes('browser_native_hd_url') && !text.includes('dash_manifest'))) return;
 
         let clean = text;
         if (clean.startsWith('for (;;);')) {
@@ -209,6 +291,28 @@
         }
 
         const foundUrls = new Set();
+
+        // 0. Parse DASH MPD manifests directly (yt-dlp format extraction)
+        const manifestRegex = /"(?:dash_manifest|dash_manifest_xml_string|manifest_xml)"\s*:\s*"([^"\\]*(?:\\.[^"\\]*)*)"/g;
+        let mm;
+        while ((mm = manifestRegex.exec(clean)) !== null) {
+            try {
+                const rawXml = JSON.parse('"' + mm[1] + '"');
+                const parsedManifest = parseDashManifestXml(rawXml);
+                if (parsedManifest) {
+                    const bestV = parsedManifest.bestVideo ? parsedManifest.bestVideo.url : null;
+                    const bestA = parsedManifest.bestAudio ? parsedManifest.bestAudio.url : null;
+                    if (bestV) {
+                        foundUrls.add(bestV);
+                        const meta = parseStreamMetadata(bestV);
+                        recordVideoEntry(meta ? meta.videoId : null, null, null, bestV);
+                        if (bestA) {
+                            recordVideoEntry(meta ? meta.videoId : null, null, null, bestA);
+                        }
+                    }
+                }
+            } catch(e) {}
+        }
 
         // 1a. Regex search: "video_id":"123...", "playable_url_quality_hd":"..."
         const chunkRegex = /"(?:video_id|fbid|id)"\s*:\s*"?(\d{10,25})"?[\s\S]{1,1500}?"(playable_url_quality_hd|browser_native_hd_url|hd_src|playable_url|browser_native_sd_url|sd_src)"\s*:\s*"([^"\\]*(?:\\.[^"\\]*)*)"/g;
@@ -431,20 +535,43 @@
         if (seen.has(obj)) return { hd: null, sd: null, audio: null, id: null };
         seen.add(obj);
 
-        let res = { hd: null, sd: null, audio: null, id: null };
+        let res = { hd: null, sd: null, audio: null, dashVideo: null, dashAudio: null, id: null };
 
-        // 1. Check for Video ID (supports both string and number representations)
-        const possibleId = obj.video_id || obj.videoId || obj.videoID || obj.fbid || (obj.__typename === 'Video' ? obj.id : null) || (obj.creation_story ? obj.creation_story.id : null);
-        if (possibleId !== undefined && possibleId !== null) {
-            const strId = String(possibleId).trim();
+        // 1. Check for Video ID (strictly targeting video elements, never post/user entities)
+        let foundId = null;
+        if (obj.video_id || obj.videoId || obj.videoID) {
+            foundId = obj.video_id || obj.videoId || obj.videoID;
+        } else if (obj.playback_video && obj.playback_video.id) {
+            foundId = obj.playback_video.id;
+        } else if (obj.creation_story && obj.creation_story.short_form_video_context && obj.creation_story.short_form_video_context.playback_video) {
+            foundId = obj.creation_story.short_form_video_context.playback_video.id;
+        } else if (obj.__typename === 'Video' && obj.id) {
+            foundId = obj.id;
+        }
+
+        if (foundId !== null && foundId !== undefined) {
+            const strId = String(foundId).trim();
             if (/^\d{10,25}$/.test(strId)) {
                 res.id = strId;
             }
         }
-        if (!res.id && obj.id !== undefined && obj.id !== null) {
-            const strId = String(obj.id).trim();
-            if (/^\d{10,25}$/.test(strId) && !obj.feed_unit && !obj.pagelet) {
-                res.id = strId;
+
+        // Parse DASH Manifest from React Fiber props (yt-dlp Full HD / 2K format extraction)
+        const manifestStr = obj.dash_manifest || obj.dash_manifest_xml_string || obj.manifest_xml || 
+                            (obj.videoDeliveryResponse && (obj.videoDeliveryResponse.dash_manifest || obj.videoDeliveryResponse.manifest_xml)) ||
+                            (obj.videoDeliveryResponseFragment && (obj.videoDeliveryResponseFragment.dash_manifest || obj.videoDeliveryResponseFragment.manifest_xml));
+        if (manifestStr && typeof manifestStr === 'string') {
+            const parsedManifest = parseDashManifestXml(manifestStr);
+            if (parsedManifest) {
+                if (parsedManifest.bestVideo) {
+                    res.dashVideo = parsedManifest.bestVideo.url;
+                    res.dashVideoBitrate = parsedManifest.bestVideo.bandwidth;
+                    res.dashVideoPixels = parsedManifest.bestVideo.pixels;
+                }
+                if (parsedManifest.bestAudio) {
+                    res.dashAudio = parsedManifest.bestAudio.url;
+                    res.dashAudioBitrate = parsedManifest.bestAudio.bandwidth;
+                }
             }
         }
 
@@ -562,10 +689,16 @@
         let bestHd = null;
         let bestSd = null;
         let bestAudio = null;
+        let bestDashVideo = null;
+        let bestDashAudio = null;
         let detectedId = null;
 
         let depth = 0;
-        while (fiber && depth < 45) {
+        while (fiber && depth < 16) {
+            // Stop early if hitting the Feed Stream / Virtualized List container to avoid picking other posts!
+            const typeName = fiber.type ? (typeof fiber.type === 'string' ? fiber.type : (fiber.type.displayName || fiber.type.name || '')) : '';
+            if (/Feed|Stream|Virtual|Scrollable|Cursor/i.test(typeName)) break;
+
             const sources = [fiber.memoizedProps, fiber.memoizedState, fiber.pendingProps];
             for (const src of sources) {
                 if (src && typeof src === 'object') {
@@ -573,10 +706,12 @@
                     if (p.hd && !bestHd) bestHd = p.hd;
                     if (p.sd && !bestSd) bestSd = p.sd;
                     if (p.audio && !bestAudio) bestAudio = p.audio;
+                    if (p.dashVideo && !bestDashVideo) bestDashVideo = p.dashVideo;
+                    if (p.dashAudio && !bestDashAudio) bestDashAudio = p.dashAudio;
                     if (p.id && !detectedId) detectedId = p.id;
                 }
             }
-            if (bestHd && detectedId) break;
+            if ((bestHd || (bestDashVideo && bestDashAudio)) && detectedId) break;
             fiber = fiber.return;
             depth++;
         }
@@ -591,6 +726,8 @@
                     if (p.hd && !bestHd) bestHd = p.hd;
                     if (p.sd && !bestSd) bestSd = p.sd;
                     if (p.audio && !bestAudio) bestAudio = p.audio;
+                    if (p.dashVideo && !bestDashVideo) bestDashVideo = p.dashVideo;
+                    if (p.dashAudio && !bestDashAudio) bestDashAudio = p.dashAudio;
                     if (p.id && !detectedId) detectedId = p.id;
                 }
                 if (curr.getAttribute && curr.getAttribute('role') === 'article') break;
@@ -598,16 +735,26 @@
             }
         }
 
-        if (detectedId && (bestHd || bestSd)) {
-            recordVideoEntry(detectedId, bestHd, bestSd, bestHd || bestSd);
+        if (detectedId) {
+            recordVideoEntry(detectedId, bestHd, bestSd, bestDashVideo || bestHd || bestSd);
+            if (bestDashAudio) {
+                recordVideoEntry(detectedId, null, null, bestDashAudio);
+            }
         }
 
-        return { hd: bestHd, sd: bestSd, audio: bestAudio, id: detectedId };
+        return { 
+            hd: bestHd, 
+            sd: bestSd, 
+            audio: bestAudio || bestDashAudio, 
+            dashVideo: bestDashVideo, 
+            dashAudio: bestDashAudio, 
+            id: detectedId 
+        };
     }
 
     function extractVideoUrlFromFiberTree(el) {
         const bundle = extractVideoBundleFromFiberTree(el);
-        return bundle ? (bundle.hd || bundle.sd) : null;
+        return bundle ? (bundle.dashVideo || bundle.hd || bundle.sd) : null;
     }
 
     // Extract Photo URL from React Fiber
@@ -640,7 +787,10 @@
         );
         let fiber = fiberKey ? el[fiberKey] : null;
         let depth = 0;
-        while (fiber && depth < 50) {
+        while (fiber && depth < 20) {
+            const typeName = fiber.type ? (typeof fiber.type === 'string' ? fiber.type : (fiber.type.displayName || fiber.type.name || '')) : '';
+            if (/Feed|Stream|Virtual|Scrollable|Cursor/i.test(typeName)) break;
+
             if (fiber.memoizedProps) {
                 const p = inspectFiberProps(fiber.memoizedProps);
                 if (p.id) return p.id;
@@ -690,25 +840,42 @@
 
         if (isVideo) {
             // 1. Inspect el's own React Fiber tree FIRST!
-            // Fiber tree belongs strictly to this exact DOM video element.
             if (el) {
                 const bundle = extractVideoBundleFromFiberTree(el);
                 if (bundle) {
                     if (bundle.id) verifiedId = bundle.id;
-                    if (bundle.hd) url = bundle.hd;
-                    else if (bundle.sd) url = bundle.sd;
-                    if (bundle.audio) audioUrl = bundle.audio;
+                    // Prefer highest resolution Full HD / 2K DASH streams with synchronized audio!
+                    if (bundle.dashVideo && bundle.dashAudio) {
+                        url = bundle.dashVideo;
+                        audioUrl = bundle.dashAudio;
+                    } else if (bundle.hd) {
+                        url = bundle.hd;
+                        audioUrl = bundle.audio || bundle.dashAudio;
+                    } else if (bundle.dashVideo) {
+                        url = bundle.dashVideo;
+                        audioUrl = bundle.audio || bundle.dashAudio;
+                    } else if (bundle.sd) {
+                        url = bundle.sd;
+                        audioUrl = bundle.audio;
+                    }
                 }
             }
 
-            // 2. If no direct URL from Fiber, but verified ID is found: check videoStoreById
+            // 2. If no direct URL from Fiber, check videoStoreById strictly by verifiedId
             if (!url && verifiedId && videoStoreById.has(verifiedId)) {
                 const entry = videoStoreById.get(verifiedId);
-                if (entry.hd) url = entry.hd;
-                else if (entry.dashVideo) {
+                if (entry.dashVideo && entry.dashAudio) {
+                    url = entry.dashVideo;
+                    audioUrl = entry.dashAudio;
+                } else if (entry.hd) {
+                    url = entry.hd;
+                    if (entry.dashAudio) audioUrl = entry.dashAudio;
+                } else if (entry.dashVideo) {
                     url = entry.dashVideo;
                     if (!audioUrl) audioUrl = entry.dashAudio;
-                } else if (entry.sd) url = entry.sd;
+                } else if (entry.sd) {
+                    url = entry.sd;
+                }
             }
 
             // 3. If on a dedicated Reel page /reel/<id>, use that reel ID

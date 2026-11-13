@@ -272,7 +272,8 @@
             }
 
             let qualityTag = 'HD MP4';
-            if (w >= 1920 || h >= 1920) qualityTag = 'Full HD (1080p)';
+            if (w >= 2560 || h >= 2560) qualityTag = '2K QHD (1440p)';
+            else if (w >= 1920 || h >= 1920) qualityTag = 'Full HD (1080p)';
             else if (w >= 1280 || h >= 1280) qualityTag = 'HD (720p)';
             else if (w >= 850 || h >= 850) qualityTag = 'HQ (480p)';
             else qualityTag = 'SD MP4';
@@ -282,7 +283,10 @@
                 resText.style.color = '#8a8d91';
             }
             if (qualityPill) {
-                qualityPill.textContent = (w >= 1280 || h >= 1280) ? 'Master HD' : 'Original Quality';
+                if (w >= 2560 || h >= 2560) qualityPill.textContent = '2K Ultra HD';
+                else if (w >= 1920 || h >= 1920) qualityPill.textContent = 'Full HD (1080p)';
+                else if (w >= 1280 || h >= 1280) qualityPill.textContent = 'Master HD';
+                else qualityPill.textContent = 'Original Quality';
             }
         }
     });
