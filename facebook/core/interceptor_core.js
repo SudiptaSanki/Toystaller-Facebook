@@ -427,22 +427,28 @@
     // --- Deep React Fiber Traversal with Parent (return) Walk ---
     // Specifically inspects component props to extract master HD stream before SD.
     function inspectFiberProps(obj, seen = new Set(), depth = 0) {
-        if (!obj || typeof obj !== 'object' || depth > 8) return { hd: null, sd: null, id: null };
-        if (seen.has(obj)) return { hd: null, sd: null, id: null };
+        if (!obj || typeof obj !== 'object' || depth > 8) return { hd: null, sd: null, audio: null, id: null };
+        if (seen.has(obj)) return { hd: null, sd: null, audio: null, id: null };
         seen.add(obj);
 
-        let res = { hd: null, sd: null, id: null };
+        let res = { hd: null, sd: null, audio: null, id: null };
 
-        // 1. Check for Video ID
-        if (obj.id && typeof obj.id === 'string' && /^\d{10,25}$/.test(obj.id)) {
-            res.id = obj.id;
-        } else if (obj.video_id && typeof obj.video_id === 'string' && /^\d{10,25}$/.test(obj.video_id)) {
-            res.id = obj.video_id;
-        } else if (obj.videoId && typeof obj.videoId === 'string' && /^\d{10,25}$/.test(obj.videoId)) {
-            res.id = obj.videoId;
+        // 1. Check for Video ID (supports both string and number representations)
+        const possibleId = obj.video_id || obj.videoId || obj.videoID || obj.fbid || (obj.__typename === 'Video' ? obj.id : null) || (obj.creation_story ? obj.creation_story.id : null);
+        if (possibleId !== undefined && possibleId !== null) {
+            const strId = String(possibleId).trim();
+            if (/^\d{10,25}$/.test(strId)) {
+                res.id = strId;
+            }
+        }
+        if (!res.id && obj.id !== undefined && obj.id !== null) {
+            const strId = String(obj.id).trim();
+            if (/^\d{10,25}$/.test(strId) && !obj.feed_unit && !obj.pagelet) {
+                res.id = strId;
+            }
         }
 
-        // 2. Priority HD properties
+        // 2. Priority HD properties (contains integrated stereo audio)
         const hdCandidates = [
             obj.playable_url_quality_hd,
             obj.browser_native_hd_url,
@@ -455,13 +461,13 @@
                 const clean = cleanVideoUrl(c);
                 if (clean && isValidVideo(clean)) {
                     res.hd = clean;
-                    return res; // Found master HD!
+                    break;
                 }
             }
         }
 
         // 3. Multi-version video array (video_versions)
-        if (Array.isArray(obj.video_versions) && obj.video_versions.length > 0) {
+        if (!res.hd && Array.isArray(obj.video_versions) && obj.video_versions.length > 0) {
             const sorted = [...obj.video_versions].sort((a, b) => {
                 const resA = (a.width || 0) * (a.height || 0);
                 const resB = (b.width || 0) * (b.height || 0);
@@ -472,7 +478,7 @@
                     const clean = cleanVideoUrl(v.url);
                     if (clean && isValidVideo(clean)) {
                         res.hd = clean;
-                        return res;
+                        break;
                     }
                 }
             }
@@ -495,17 +501,36 @@
                 const clean = cleanVideoUrl(c);
                 if (clean && isValidVideo(clean)) {
                     res.sd = clean;
+                    break;
                 }
             }
         }
 
-        // 5. Recurse into nested objects
-        const priorityKeys = ['video', 'media', 'creation_story', 'playbackData', 'videoData', 'feedUnit', 'attachment', 'reel'];
+        // 5. Companion Audio Track
+        const audioCandidates = [
+            obj.audioUrl,
+            obj.audio_url,
+            obj.dash_audio,
+            obj.browser_native_audio_url
+        ];
+        for (const a of audioCandidates) {
+            if (typeof a === 'string') {
+                const cleanA = cleanVideoUrl(a);
+                if (cleanA && !cleanA.startsWith('blob:') && (cleanA.includes('fbcdn.net') || cleanA.includes('fbsbx.com'))) {
+                    res.audio = cleanA;
+                    break;
+                }
+            }
+        }
+
+        // 6. Recurse into nested priority objects
+        const priorityKeys = ['video', 'media', 'creation_story', 'playbackData', 'videoData', 'attachment', 'reel'];
         for (const k of priorityKeys) {
             if (obj[k] && typeof obj[k] === 'object') {
                 const child = inspectFiberProps(obj[k], seen, depth + 1);
-                if (child.hd) { res.hd = child.hd; return res; }
+                if (child.hd && !res.hd) res.hd = child.hd;
                 if (child.sd && !res.sd) res.sd = child.sd;
+                if (child.audio && !res.audio) res.audio = child.audio;
                 if (child.id && !res.id) res.id = child.id;
             }
         }
@@ -514,8 +539,9 @@
             if (priorityKeys.includes(k) || k === 'return' || k === 'sibling' || k === 'child' || k === '_owner' || k === 'stateNode') continue;
             if (obj[k] && typeof obj[k] === 'object') {
                 const child = inspectFiberProps(obj[k], seen, depth + 1);
-                if (child.hd) { res.hd = child.hd; return res; }
+                if (child.hd && !res.hd) res.hd = child.hd;
                 if (child.sd && !res.sd) res.sd = child.sd;
+                if (child.audio && !res.audio) res.audio = child.audio;
                 if (child.id && !res.id) res.id = child.id;
             }
         }
@@ -523,11 +549,10 @@
         return res;
     }
 
-    // Traverses the React Fiber hierarchy from the given DOM element up to 45 ancestor components.
-    function extractVideoUrlFromFiberTree(el) {
+    // Traverses the React Fiber hierarchy of the EXACT DOM video element
+    function extractVideoBundleFromFiberTree(el) {
         if (!el) return null;
 
-        // Locate Fiber key
         const fiberKey = Object.keys(el).find(k =>
             k.startsWith('__reactFiber$') ||
             k.startsWith('__reactInternalInstance$')
@@ -536,47 +561,53 @@
 
         let bestHd = null;
         let bestSd = null;
+        let bestAudio = null;
         let detectedId = null;
 
         let depth = 0;
         while (fiber && depth < 45) {
-            // Inspect props and state
-            if (fiber.memoizedProps) {
-                const p = inspectFiberProps(fiber.memoizedProps);
-                if (p.hd) { bestHd = p.hd; break; }
-                if (p.sd && !bestSd) bestSd = p.sd;
-                if (p.id && !detectedId) detectedId = p.id;
+            const sources = [fiber.memoizedProps, fiber.memoizedState, fiber.pendingProps];
+            for (const src of sources) {
+                if (src && typeof src === 'object') {
+                    const p = inspectFiberProps(src);
+                    if (p.hd && !bestHd) bestHd = p.hd;
+                    if (p.sd && !bestSd) bestSd = p.sd;
+                    if (p.audio && !bestAudio) bestAudio = p.audio;
+                    if (p.id && !detectedId) detectedId = p.id;
+                }
             }
-            if (fiber.memoizedState) {
-                const s = inspectFiberProps(fiber.memoizedState);
-                if (s.hd) { bestHd = s.hd; break; }
-                if (s.sd && !bestSd) bestSd = s.sd;
-                if (s.id && !detectedId) detectedId = s.id;
-            }
-            if (fiber.pendingProps) {
-                const pp = inspectFiberProps(fiber.pendingProps);
-                if (pp.hd) { bestHd = pp.hd; break; }
-                if (pp.sd && !bestSd) bestSd = pp.sd;
-                if (pp.id && !detectedId) detectedId = pp.id;
-            }
-
+            if (bestHd && detectedId) break;
             fiber = fiber.return;
             depth++;
         }
 
-        if (bestHd) {
-            if (detectedId) recordVideoEntry(detectedId, bestHd, bestSd, bestHd);
-            return bestHd;
+        // Also check __reactProps$ on element and immediate parent (stopping before article)
+        if (!bestHd || !detectedId) {
+            let curr = el;
+            for (let i = 0; i < 6 && curr; i++) {
+                const propsKey = Object.keys(curr).find(k => k.startsWith('__reactProps$'));
+                if (propsKey && curr[propsKey]) {
+                    const p = inspectFiberProps(curr[propsKey]);
+                    if (p.hd && !bestHd) bestHd = p.hd;
+                    if (p.sd && !bestSd) bestSd = p.sd;
+                    if (p.audio && !bestAudio) bestAudio = p.audio;
+                    if (p.id && !detectedId) detectedId = p.id;
+                }
+                if (curr.getAttribute && curr.getAttribute('role') === 'article') break;
+                curr = curr.parentElement;
+            }
         }
 
-        // If an ID was detected, check the video store for HD
-        if (detectedId && videoStoreById.has(detectedId)) {
-            const entry = videoStoreById.get(detectedId);
-            if (entry.hd) return entry.hd;
+        if (detectedId && (bestHd || bestSd)) {
+            recordVideoEntry(detectedId, bestHd, bestSd, bestHd || bestSd);
         }
 
-        if (bestSd) return bestSd;
-        return null;
+        return { hd: bestHd, sd: bestSd, audio: bestAudio, id: detectedId };
+    }
+
+    function extractVideoUrlFromFiberTree(el) {
+        const bundle = extractVideoBundleFromFiberTree(el);
+        return bundle ? (bundle.hd || bundle.sd) : null;
     }
 
     // Extract Photo URL from React Fiber
@@ -655,60 +686,72 @@
 
         let url = null;
         let audioUrl = null;
+        let verifiedId = null;
 
         if (isVideo) {
-            // 1. If we have a video ID for this element, check video store
-            if (detectedVideoId && videoStoreById.has(detectedVideoId)) {
-                const entry = videoStoreById.get(detectedVideoId);
-                if (entry.hd) {
-                    url = entry.hd;
-                } else if (entry.dashVideo) {
-                    url = entry.dashVideo;
-                    audioUrl = entry.dashAudio;
-                } else if (entry.sd) {
-                    url = entry.sd;
+            // 1. Inspect el's own React Fiber tree FIRST!
+            // Fiber tree belongs strictly to this exact DOM video element.
+            if (el) {
+                const bundle = extractVideoBundleFromFiberTree(el);
+                if (bundle) {
+                    if (bundle.id) verifiedId = bundle.id;
+                    if (bundle.hd) url = bundle.hd;
+                    else if (bundle.sd) url = bundle.sd;
+                    if (bundle.audio) audioUrl = bundle.audio;
                 }
             }
 
-            // 2. Check current dedicated Reel page URL if on /reel/<id>
+            // 2. If no direct URL from Fiber, but verified ID is found: check videoStoreById
+            if (!url && verifiedId && videoStoreById.has(verifiedId)) {
+                const entry = videoStoreById.get(verifiedId);
+                if (entry.hd) url = entry.hd;
+                else if (entry.dashVideo) {
+                    url = entry.dashVideo;
+                    if (!audioUrl) audioUrl = entry.dashAudio;
+                } else if (entry.sd) url = entry.sd;
+            }
+
+            // 3. If on a dedicated Reel page /reel/<id>, use that reel ID
             if (!url && window.location.pathname.includes('/reel/')) {
                 const m = window.location.pathname.match(/\/reel\/(\d+)/);
-                if (m && m[1] && videoStoreById.has(m[1])) {
-                    const entry = videoStoreById.get(m[1]);
-                    if (entry.hd) {
-                        url = entry.hd;
-                    } else if (entry.dashVideo) {
-                        url = entry.dashVideo;
-                        audioUrl = entry.dashAudio;
-                    } else if (entry.sd) {
-                        url = entry.sd;
+                if (m && m[1]) {
+                    const reelId = m[1];
+                    if (videoStoreById.has(reelId)) {
+                        const entry = videoStoreById.get(reelId);
+                        if (entry.hd) url = entry.hd;
+                        else if (entry.dashVideo) {
+                            url = entry.dashVideo;
+                            if (!audioUrl) audioUrl = entry.dashAudio;
+                        } else if (entry.sd) url = entry.sd;
                     }
-                    if (!detectedVideoId) detectedVideoId = m[1];
+                    if (!verifiedId) verifiedId = reelId;
                 }
             }
 
-            // 3. Walk the React Fiber hierarchy of the exact clicked element
-            if (!url && el) {
-                url = extractVideoUrlFromFiberTree(el);
+            // 4. If requestedVideoId was explicitly passed from a direct link on el, check videoStoreById
+            if (!url && requestedVideoId && videoStoreById.has(requestedVideoId)) {
+                const entry = videoStoreById.get(requestedVideoId);
+                if (entry.hd) url = entry.hd;
+                else if (entry.dashVideo) {
+                    url = entry.dashVideo;
+                    if (!audioUrl) audioUrl = entry.dashAudio;
+                } else if (entry.sd) url = entry.sd;
+                if (!verifiedId) verifiedId = requestedVideoId;
             }
 
-            // 4. Platform DOM lookup strictly matching this element's video ID
-            if (!url && el) {
+            // 5. Platform DOM lookup strictly matching this element's verified ID
+            if (!url && el && verifiedId) {
                 const platform = getPlatform();
                 if (platform.extractVideoUrlFromDOM) {
                     url = platform.extractVideoUrlFromDOM(el);
                 }
             }
 
-            // 5. If we found a video URL, resolve companion audio track
-            if (url && !audioUrl) {
-                const meta = parseStreamMetadata(url);
-                const vid = (meta && meta.videoId) || detectedVideoId;
-                if (vid && videoStoreById.has(vid)) {
-                    const entry = videoStoreById.get(vid);
-                    if (entry.dashAudio) {
-                        audioUrl = entry.dashAudio;
-                    }
+            // 6. If we found a video URL, resolve companion audio track if needed
+            if (url && !audioUrl && verifiedId && videoStoreById.has(verifiedId)) {
+                const entry = videoStoreById.get(verifiedId);
+                if (entry && entry.dashAudio) {
+                    audioUrl = entry.dashAudio;
                 }
             }
 
@@ -730,17 +773,16 @@
 
         console.log(`[Toystaller] Responding to media request [${reqId}]:`, {
             isVideo: isVideo,
-            targetId: detectedVideoId,
+            targetId: verifiedId || requestedVideoId,
             foundVideoUrl: url ? (url.substring(0, 80) + '...') : 'null',
             foundAudioUrl: audioUrl ? (audioUrl.substring(0, 80) + '...') : 'null'
         });
 
         let isMasterProgressive = false;
         if (url) {
-            const parsedMeta = parseStreamMetadata(url);
-            const vid = detectedVideoId || (parsedMeta && parsedMeta.videoId);
+            const vid = verifiedId || requestedVideoId;
             const entry = vid ? videoStoreById.get(vid) : null;
-            if (entry && (entry.hd === url || entry.isMasterProgressive)) {
+            if ((entry && (entry.hd === url || entry.isMasterProgressive)) || (url.includes('/v/t64.') || url.includes('/v/t39.'))) {
                 isMasterProgressive = true;
             }
         }
@@ -749,7 +791,7 @@
             type: 'magic_response_react_url_' + reqId,
             url: url,
             audioUrl: audioUrl,
-            videoId: detectedVideoId,
+            videoId: verifiedId || requestedVideoId,
             isMasterProgressive: isMasterProgressive
         }, '*');
     });

@@ -621,73 +621,54 @@ function injectDownloadButtons() {
                     const currentId = platform.extractVideoId ? platform.extractVideoId(media) : null;
                     console.log(`[Toystaller] Clicked Video/Reel element. Extracted target ID: [${currentId}]`);
 
-                    // Check if cached video resolution matches the currently active video/reel
-                    if (openBtn.__resolvedVideoUrl && isValidVideoUrl(openBtn.__resolvedVideoUrl)) {
-                        if (!currentId || !openBtn.__resolvedVideoId || openBtn.__resolvedVideoId === currentId) {
-                            console.log(`[Toystaller] Opening from validated cache for Reel [${currentId}]:`, openBtn.__resolvedVideoUrl);
-                            openVideo(openBtn.__resolvedVideoUrl, openBtn.__resolvedAudioUrl);
-                            return;
-                        } else {
-                            delete openBtn.__resolvedVideoUrl;
-                            delete openBtn.__resolvedAudioUrl;
-                            delete openBtn.__resolvedVideoId;
-                        }
-                    }
+                    // Always clear resolution cache on click to guarantee we extract the fresh, active video
+                    delete openBtn.__resolvedVideoUrl;
+                    delete openBtn.__resolvedAudioUrl;
+                    delete openBtn.__resolvedVideoId;
 
                     // Loading indicator on button
                     openBtn.style.opacity = '0.35';
                     openBtn.style.pointerEvents = 'none';
-
-                    let resolved = false;
-
-                    // Fast-path: Fetch master progressive stream with synchronized audio directly via same-origin fetch
-                    if (currentId) {
-                        fetchMasterProgressiveUrl(currentId).then(masterUrl => {
-                            if (resolved) return;
-                            if (masterUrl && isValidVideoUrl(masterUrl)) {
-                                resolved = true;
-                                openBtn.style.opacity = '1';
-                                openBtn.style.pointerEvents = 'auto';
-                                openBtn.__resolvedVideoUrl = masterUrl;
-                                openBtn.__resolvedAudioUrl = null;
-                                openBtn.__resolvedVideoId = currentId;
-                                console.log(`[Toystaller] Fast-path master progressive stream resolved with audio for [${currentId}]!`);
-                                openVideo(masterUrl, null);
-                            }
-                        }).catch(() => {});
-                    }
 
                     // Safe extraction with retry loop
                     let attempts = 0;
                     const maxAttempts = 6;
 
                     const tryExtract = () => {
-                        if (resolved) return;
                         attempts++;
                         getMediaUrl((url, audioUrl, returnedVideoId, isMaster) => {
-                            if (resolved) return;
+                            const targetVideoId = currentId || returnedVideoId;
 
-                            // If a specific Reel ID is expected, reject mismatching streams
-                            if (currentId && returnedVideoId && returnedVideoId !== currentId) {
-                                console.warn(`[Toystaller] Returned ID (${returnedVideoId}) does not match active Reel (${currentId}), retrying...`);
-                                url = null;
-                            }
-
+                            // If this stream is already a master progressive MP4 (audio + video merged)
                             const isMasterProgressive = isMaster || isProgressiveStream(url);
 
                             if (url && isValidVideoUrl(url) && (audioUrl || isMasterProgressive)) {
-                                resolved = true;
                                 openBtn.style.opacity = '1';
                                 openBtn.style.pointerEvents = 'auto';
-                                openBtn.__resolvedVideoUrl = url;
-                                openBtn.__resolvedAudioUrl = audioUrl;
-                                openBtn.__resolvedVideoId = currentId || returnedVideoId;
-                                console.log(`[Toystaller] Successfully resolved Reel [${currentId || returnedVideoId}]:`, {
+                                console.log(`[Toystaller] Successfully resolved Video [${targetVideoId}]:`, {
                                     video: url,
                                     audio: audioUrl,
                                     isMasterProgressive: isMasterProgressive
                                 });
                                 openVideo(url, audioUrl);
+                                return;
+                            }
+
+                            // If we have video but no audio, and an associated video ID exists, upgrade to master progressive stream
+                            if (url && isValidVideoUrl(url) && targetVideoId && !isMasterProgressive && !audioUrl) {
+                                fetchMasterProgressiveUrl(targetVideoId).then(masterUrl => {
+                                    openBtn.style.opacity = '1';
+                                    openBtn.style.pointerEvents = 'auto';
+                                    if (masterUrl && isValidVideoUrl(masterUrl)) {
+                                        openVideo(masterUrl, null);
+                                    } else {
+                                        openVideo(url, null);
+                                    }
+                                }).catch(() => {
+                                    openBtn.style.opacity = '1';
+                                    openBtn.style.pointerEvents = 'auto';
+                                    openVideo(url, null);
+                                });
                                 return;
                             }
 
@@ -698,24 +679,21 @@ function injectDownloadButtons() {
                                 }
                                 setTimeout(tryExtract, 350);
                             } else {
-                                if (resolved) return;
                                 openBtn.style.opacity = '1';
                                 openBtn.style.pointerEvents = 'auto';
 
-                                // Automatic seamless background reload extraction:
-                                // Reloads the Reel URL in backend pipeline to extract master progressive stream with audio
-                                const reelUrl = currentId ? `https://www.facebook.com/reel/${currentId}` : (window.location.href.includes('/reel/') ? window.location.href : null);
-                                if (reelUrl) {
-                                    console.log(`[Toystaller] Launching seamless reload extraction for [${currentId}]...`);
+                                if (url && isValidVideoUrl(url)) {
+                                    openVideo(url, audioUrl);
+                                } else if (targetVideoId) {
+                                    const reelUrl = `https://www.facebook.com/reel/${targetVideoId}`;
+                                    console.log(`[Toystaller] Launching seamless reload extraction for [${targetVideoId}]...`);
                                     safeSendMessage({
                                         action: 'autoReloadReelAndOpen',
                                         reelUrl: reelUrl,
-                                        videoId: currentId
+                                        videoId: targetVideoId
                                     });
-                                } else if (url && isValidVideoUrl(url)) {
-                                    openVideo(url, audioUrl);
                                 } else {
-                                    alert('Toystaller: Could not load the media stream for this Reel.\n\nTip: Please let the Reel play for a second, then click the button again.');
+                                    alert('Toystaller: Could not load the media stream for this video.\n\nTip: Please let the video play for a second, then click the button again.');
                                 }
                             }
                         }, true, currentId);
@@ -775,21 +753,6 @@ function injectDownloadButtons() {
                 return buttons;
             };
 
-            // Pre-resolve video URL to conditionally show/hide the blue button
-            const preResolveVideoUrl = (openBtn) => {
-                if (!isVideo) return;
-                const currentId = platform.extractVideoId ? platform.extractVideoId(media) : null;
-                getMediaUrl((url, audioUrl) => {
-                    const clean = cleanVideoUrl(url);
-                    if (clean && isValidVideoUrl(clean)) {
-                        openBtn.__resolvedVideoUrl = clean;
-                        openBtn.__resolvedAudioUrl = cleanVideoUrl(audioUrl);
-                        openBtn.__resolvedVideoId = currentId;
-                        openBtn.style.display = 'flex';
-                    }
-                }, true, currentId);
-            };
-
             const getMediaUrl = (callback, silent = false, videoId = null) => {
                 if (isVideo) {
                     let resolved = false;
@@ -827,60 +790,34 @@ function injectDownloadButtons() {
             const getMediaUrlFallback = (callback, silent = false, videoId = null) => {
                 const candidates = [];
 
-                // 1. Direct scan of document <script> tags matching videoId
-                if (isVideo) {
+                // 1. Direct scan of document <script> tags strictly matching videoId
+                if (isVideo && videoId) {
                     const scripts = document.querySelectorAll('script[type="application/json"], script:not([src])');
                     const cdnRegex = /"(https:(?:\\\/\\\/|\/\/)[^"]+?(?:fbcdn\.net|fbsbx\.com)[^"]+?\.(?:mp4|m4v)[^"]*)"/g;
-                    
-                    if (videoId) {
-                        for (const s of scripts) {
-                            const text = s.textContent;
-                            if (text && text.includes(videoId)) {
-                                let m;
-                                while ((m = cdnRegex.exec(text)) !== null) {
-                                    try {
-                                        const u = cleanVideoUrl(JSON.parse('"' + m[1] + '"'));
-                                        if (u && isValidVideoUrl(u)) candidates.push(u);
-                                    } catch(e) {
-                                        const u = cleanVideoUrl(m[1]);
-                                        if (u && isValidVideoUrl(u)) candidates.push(u);
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    // If no candidate was found for videoId and no specific videoId was requested, scan scripts
-                    if (candidates.length === 0 && !videoId) {
-                        for (const s of scripts) {
-                            const text = s.textContent;
-                            if (text && (text.includes('playable_url_quality_hd') || text.includes('browser_native_hd_url') || text.includes('playable_url'))) {
-                                let m;
-                                while ((m = cdnRegex.exec(text)) !== null) {
-                                    try {
-                                        const u = cleanVideoUrl(JSON.parse('"' + m[1] + '"'));
-                                        if (u && isValidVideoUrl(u)) candidates.push(u);
-                                    } catch(e) {
-                                        const u = cleanVideoUrl(m[1]);
-                                        if (u && isValidVideoUrl(u)) candidates.push(u);
-                                    }
+                    for (const s of scripts) {
+                        const text = s.textContent;
+                        if (text && text.includes(videoId)) {
+                            let m;
+                            while ((m = cdnRegex.exec(text)) !== null) {
+                                try {
+                                    const u = cleanVideoUrl(JSON.parse('"' + m[1] + '"'));
+                                    if (u && isValidVideoUrl(u)) candidates.push(u);
+                                } catch(e) {
+                                    const u = cleanVideoUrl(m[1]);
+                                    if (u && isValidVideoUrl(u)) candidates.push(u);
                                 }
                             }
                         }
                     }
                 }
 
-                // 2. Check in-memory intercepted video URLs from live fetch/XHR
-                if (isVideo && pageInterceptedVideoUrls.size > 0) {
+                // 2. Check in-memory intercepted video URLs from live fetch/XHR strictly matching videoId
+                if (isVideo && pageInterceptedVideoUrls.size > 0 && videoId) {
                     for (const u of pageInterceptedVideoUrls) {
                         const clean = cleanVideoUrl(u);
                         if (clean && isValidVideoUrl(clean)) {
-                            if (videoId) {
-                                const meta = parseStreamMetadata(clean);
-                                if (meta && meta.videoId === videoId) {
-                                    candidates.push(clean);
-                                }
-                            } else {
+                            const meta = parseStreamMetadata(clean);
+                            if (meta && meta.videoId === videoId) {
                                 candidates.push(clean);
                             }
                         }
@@ -895,43 +832,39 @@ function injectDownloadButtons() {
                     }
                 }
 
-                // 3. Fallback to background script webRequest
-                safeSendMessage({ action: 'getMediaUrls', mediaType: isVideo ? 'video' : 'img' }, (response) => {
-                    if (response && response.urls && response.urls.length > 0) {
-                        const cleaned = response.urls.map(cleanVideoUrl).filter(Boolean);
-                        const bgCandidates = cleaned.filter(isValidVideoUrl).filter(u => {
-                            if (!videoId) return true;
-                            const meta = parseStreamMetadata(u);
-                            return meta && meta.videoId === videoId;
-                        });
-                        if (bgCandidates.length > 0) {
-                            const best = pickBestVideoUrl(bgCandidates);
-                            if (best && isValidVideoUrl(best)) {
-                                callback(best, null, videoId);
-                                return;
+                // 3. Fallback to background script webRequest strictly matching videoId
+                if (videoId) {
+                    safeSendMessage({ action: 'getMediaUrls', mediaType: isVideo ? 'video' : 'img' }, (response) => {
+                        if (response && response.urls && response.urls.length > 0) {
+                            const cleaned = response.urls.map(cleanVideoUrl).filter(Boolean);
+                            const bgCandidates = cleaned.filter(isValidVideoUrl).filter(u => {
+                                const meta = parseStreamMetadata(u);
+                                return meta && meta.videoId === videoId;
+                            });
+                            if (bgCandidates.length > 0) {
+                                const best = pickBestVideoUrl(bgCandidates);
+                                if (best && isValidVideoUrl(best)) {
+                                    callback(best, null, videoId);
+                                    return;
+                                }
                             }
                         }
-                    }
-                    callback(null, null, videoId);
-                });
+                        callback(null, null, videoId);
+                    });
+                    return;
+                }
+
+                // 4. Element currentSrc direct check (if valid non-blob MP4 source)
+                if (media.currentSrc && isValidVideoUrl(media.currentSrc)) {
+                    callback(cleanVideoUrl(media.currentSrc), null, null);
+                    return;
+                }
+
+                callback(null, null, null);
             };
 
             if (window.magicOverlayManager) {
                 window.magicOverlayManager.addOverlay(media, createButtonsFn);
-                if (isVideo) {
-                    const doPreResolve = () => {
-                        const overlay = window.magicOverlayManager.overlays.get(media);
-                        if (overlay && overlay.container) {
-                            const openBtn = overlay.container.querySelector('.magic-open-btn');
-                            if (openBtn) {
-                                preResolveVideoUrl(openBtn);
-                            }
-                        }
-                    };
-                    setTimeout(doPreResolve, 200);
-                    media.addEventListener('play', doPreResolve, { passive: true });
-                    media.addEventListener('playing', doPreResolve, { passive: true });
-                }
             }
         }
     });

@@ -703,37 +703,34 @@ window.ToystallerPlatforms = window.ToystallerPlatforms || {};
                 return el.dataset.videoId || el.dataset.video_id;
             }
 
-            // 2. Nearest ancestor container checks
-            const reelLink = el.closest ? el.closest('a[href*="/reel/"], a[href*="/reels/"]') : null;
-            if (reelLink && reelLink.href) {
-                const m = reelLink.href.match(/\/reel(?:s)?\/(\d+)/);
+            // 2. Direct ancestor wrapper link (ancestor checks only — NEVER query descendants across carousel shelves!)
+            const directLink = el.closest ? el.closest('a[href*="/reel/"], a[href*="/reels/"], a[href*="/videos/"], a[href*="/watch/"]') : null;
+            if (directLink && directLink.href) {
+                const m = directLink.href.match(/(?:reel(?:s)?\/|videos\/|watch\/?\?v=)(\d+)/);
                 if (m) return m[1];
             }
 
-            const videoLink = el.closest ? el.closest('a[href*="/videos/"], a[href*="/watch/"]') : null;
-            if (videoLink && videoLink.href) {
-                const m = videoLink.href.match(/(?:videos\/|watch\/?\?v=)(\d+)/);
-                if (m) return m[1];
-            }
-
-            const cardWithId = el.closest ? el.closest('[data-video-id], div[data-pagelet*="Reel"], div[data-pagelet*="FeedUnit"], div[role="article"]') : null;
-            if (cardWithId) {
-                if (cardWithId.dataset && cardWithId.dataset.videoId) return cardWithId.dataset.videoId;
-                const link = cardWithId.querySelector ? cardWithId.querySelector('a[href*="/reel/"], a[href*="/videos/"], a[href*="/watch/"]') : null;
-                if (link && link.href) {
-                    const m = link.href.match(/(?:reel\/|videos\/|watch\/?\?v=)(\d+)/);
-                    if (m) return m[1];
+            // 3. Immediate parent containers up to 4 levels (strictly stopping before feed/carousel trays)
+            let curr = el.parentElement;
+            for (let i = 0; i < 4 && curr && curr !== document.body; i++) {
+                if (curr.dataset && (curr.dataset.videoId || curr.dataset.video_id)) {
+                    return curr.dataset.videoId || curr.dataset.video_id;
                 }
+                // Stop immediately if reaching a FeedUnit, Reel tray, or post card
+                if (curr.getAttribute('role') === 'article' || (curr.dataset && curr.dataset.pagelet && (curr.dataset.pagelet.includes('FeedUnit') || curr.dataset.pagelet.includes('Reel')))) {
+                    break;
+                }
+                curr = curr.parentElement;
             }
 
-            // 3. Check page URL if on dedicated video route
-            const loc = window.location.pathname;
-            if (loc.includes('/reel/')) {
-                const m = loc.match(/\/reel\/(\d+)/);
+            // 4. Check dedicated page URL if on /reel/<id> or /watch/?v=<id>
+            const path = window.location.pathname.toLowerCase();
+            if (path.includes('/reel/')) {
+                const m = path.match(/\/reel\/(\d+)/);
                 if (m) return m[1];
             }
-            if (loc.includes('/videos/') || window.location.search.includes('v=')) {
-                const m = (loc + window.location.search).match(/(?:videos\/|v=)(\d+)/);
+            if (path.includes('/videos/') || window.location.search.includes('v=')) {
+                const m = (path + window.location.search).match(/(?:videos\/|v=)(\d+)/);
                 if (m) return m[1];
             }
 
